@@ -89,8 +89,133 @@ def parse_rss(url, source):
             "title": title,
             "link": (it.findtext("link") or "").strip(),
             "ts": to_epoch(pub),
+            "desc": clean(it.findtext("description") or it.findtext("{http://www.w3.org/2005/Atom}summary") or "")[:400],
         })
     return out
+
+
+# ----------------------------- 취약점 한글 분류 -----------------------------
+# 공격 유형: (영어 키워드들, 한글 이름, 한 줄 영향 설명, 위험 등급 1=빨강 2=주황 3=노랑)
+# 위에서부터 먼저 일치하는 것이 적용되므로 순서를 바꾸지 마세요.
+ATTACKS = [
+    (("remote code execution", "arbitrary code", "code execution", "command injection", "os command",
+      "code injection", "deserialization"), "원격 코드 실행", "서버를 원격으로 장악", 1),
+    (("authentication bypass", "improper authentication", "missing authentication", "authorization bypass",
+      "default credential", "hard-coded", "hardcoded", "auth bypass"), "인증 우회", "로그인 없이 접근", 1),
+    (("privilege escalation", "elevation of privilege", "improper privilege", "privilege"),
+     "권한 상승", "관리자 권한 탈취", 1),
+    (("sql injection",), "SQL 인젝션", "DB 정보 탈취·변조", 1),
+    (("xml external entity", "xxe", "server-side request forgery", "ssrf"), "XXE·SSRF", "내부 정보 유출", 2),
+    (("path traversal", "directory traversal", "file upload", "arbitrary file", "file read", "file inclusion"),
+     "파일 조작·탈취", "서버 파일 열람·유출", 2),
+    (("security feature bypass", "bypass"), "보안 기능 우회", "방어 장치 무력화", 2),
+    (("buffer overflow", "use after free", "use-after-free", "out-of-bounds", "memory corruption", "heap",
+      "type confusion"), "메모리 손상", "코드 실행·장애 유발", 2),
+    (("denial of service", "denial-of-service", "resource exhaustion", "crash"),
+     "서비스 거부(DoS)", "장비 중단·마비", 3),
+    (("cross-site scripting", "xss"), "XSS", "악성 스크립트 실행", 3),
+    (("information disclosure", "sensitive information", "information exposure", "information leak", "disclosure"),
+     "정보 노출", "민감정보 유출", 3),
+]
+DEFAULT_ATK = ("기타 취약점", "상세 내용은 원문 확인", 3)
+
+# 대상 분류: (영어 단어들, 분류 이름)
+DEFAULT_CAT = "기타 SW·장비"
+CATS = [
+    (("vpn", "firewall", "adaptive security appliance", "asa", "ftd", "firepower", "fortios", "fortigate",
+      "pan-os", "sonicwall", "globalprotect", "netscaler", "big-ip", "secure client"), "방화벽·VPN"),
+    (("exchange", "mail", "webmail", "zimbra", "roundcube", "postfix", "esa"), "메일 서버"),
+    (("chrome", "chromium", "firefox", "edge", "safari", "browser", "webkit"), "웹 브라우저"),
+    (("windows", "kernel", "linux", "ubuntu", "android", "ios", "macos", "apple"), "OS·커널"),
+    (("wordpress", "php", "apache", "nginx", "tomcat", "iis", "node.js", "openssh", "ssh", "web", "joomla",
+      "drupal", "struts", "spring"), "웹·서버 SW"),
+    (("sql", "oracle", "mysql", "postgres", "postgresql", "database", "mongodb", "redis"), "데이터베이스"),
+    (("router", "switch", "meraki", "access point", "wlc", "camera", "nas", "synology", "qnap", "d-link",
+      "dlink", "tp-link", "zyxel"), "네트워크·IoT 장비"),
+    (("vmware", "esxi", "vcenter", "hyper-v", "citrix", "kubernetes", "docker", "gitlab", "jenkins", "ibm",
+      "sap", "gpustack", "aspera"), "서버·플랫폼"),
+]
+# 분류별 우리 취급 솔루션 제안 (영업 포인트)
+SOL = {
+    "방화벽·VPN": "AXGATE·Cisco FirePower",
+    "메일 서버": "Cisco ESA",
+    "웹·서버 SW": "SolidStep·MetiEye",
+    "OS·커널": "지니언스 EDR",
+    "웹 브라우저": "지니언스 EDR",
+    "데이터베이스": "넷앤드 DB접근통제",
+    "네트워크·IoT 장비": "지니언스 NAC·Meraki",
+    "서버·플랫폼": "SolidStep·넷앤드 PSM",
+    "Cisco 장비·SW": "Cisco 보안 패치",
+    DEFAULT_CAT: "Ai-Spera CTI",
+}
+OUR_VENDORS = ("cisco", "genians", "axgate", "netand", "ai-spera", "ssr")
+SEV_KO = {"Critical": "치명", "High": "높음", "Medium": "중간", "Low": "낮음"}
+
+
+def classify(*texts):
+    """제목/설명에서 공격 유형을 찾아 (한글 이름, 영향 설명, 등급) 반환"""
+    for t in texts:
+        low = (t or "").lower()
+        for keys, label, eff, lvl in ATTACKS:
+            if any(k in low for k in keys):
+                return label, eff, lvl
+    return DEFAULT_ATK
+
+
+def categorize(text):
+    low = (text or "").lower()
+    for keys, cat in CATS:
+        if any(re.search(r"\b" + re.escape(k) + r"\b", low) for k in keys):
+            return cat
+    return DEFAULT_CAT
+
+
+def guess_product(desc):
+    """NVD 영문 설명에서 제품명 부분만 대략 추출"""
+    try:
+        m = re.search(r"(?:vulnerability|flaw|issue|weakness) in (?:the )?(.{4,60}?)"
+                      r"(?: (?:of|could|allows|that|which|before|prior|through|version)\b|[,.;(])", desc, re.I)
+        if m:
+            return m.group(1).strip()
+        m = re.match(r"(.{4,40}?)(?: (?:before|prior to|through|version|allows|is|in|up to)\b|[,(])", desc)
+        return (m.group(1) if m else desc[:40]).strip()
+    except Exception:
+        return desc[:40]
+
+
+def kev_item(v):
+    name = v.get("vulnerabilityName", "")
+    vendor = v.get("vendorProject", "")
+    product = v.get("product", "")
+    short = v.get("shortDescription", "")
+    atk, eff, lvl = classify(name, short)
+    cat = categorize(" ".join([vendor, product, name, short]))
+    if cat == DEFAULT_CAT and "cisco" in vendor.lower():
+        cat = "Cisco 장비·SW"
+    return {
+        "cve": v.get("cveID", ""),
+        "vendor": vendor,
+        "product": product,
+        "name": name,
+        "added": v.get("dateAdded", ""),
+        "due": v.get("dueDate", ""),
+        "ransom": v.get("knownRansomwareCampaignUse", "") == "Known",
+        "ours": any(k in vendor.lower() for k in OUR_VENDORS),
+        "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sol": SOL.get(cat, SOL[DEFAULT_CAT]),
+    }
+
+
+def psirt_item(x):
+    desc = x.get("desc", "")
+    atk, eff, lvl = classify(x["title"], desc)
+    cat = categorize(x["title"])
+    if cat == DEFAULT_CAT:
+        cat = "Cisco 장비·SW"
+    m = re.search(r"(?:Impact Rating|Severity)\W{0,6}(Critical|High|Medium|Low)", desc, re.I)
+    sev = SEV_KO.get(m.group(1).capitalize(), "") if m else ""
+    title = re.sub(r"\s+Vulnerabilit(?:y|ies)$", "", x["title"])
+    return {"title": title, "link": x.get("link", ""), "ts": x["ts"],
+            "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev}
 
 
 # ----------------------------- 수집 -----------------------------
@@ -122,16 +247,7 @@ def fetch_kev():
     data = json.loads(http_get(KEV_URL, 40).decode("utf-8"))
     vulns = sorted(data.get("vulnerabilities", []),
                    key=lambda v: (v.get("dateAdded", ""), v.get("cveID", "")), reverse=True)[:8]
-    return [{
-        "cve": v.get("cveID", ""),
-        "vendor": v.get("vendorProject", ""),
-        "product": v.get("product", ""),
-        "name": v.get("vulnerabilityName", ""),
-        "added": v.get("dateAdded", ""),
-        "due": v.get("dueDate", ""),
-        "ransom": v.get("knownRansomwareCampaignUse", "") == "Known",
-        "ours": "cisco" in v.get("vendorProject", "").lower(),
-    } for v in vulns]
+    return [kev_item(v) for v in vulns]
 
 
 def fetch_nvd():
@@ -153,7 +269,10 @@ def fetch_nvd():
                 score = c["metrics"][k][0]["cvssData"].get("baseScore", 0)
                 break
         desc = next((d["value"] for d in c.get("descriptions", []) if d.get("lang") == "en"), "")
-        out.append({"cve": c.get("id", ""), "score": score, "desc": clean(desc)[:110]})
+        atk, eff, lvl = classify(desc)
+        out.append({"cve": c.get("id", ""), "score": score, "desc": clean(desc)[:110],
+                    "atk": atk, "eff": eff, "lvl": lvl, "cat": categorize(desc),
+                    "prod": guess_product(clean(desc))})
     out.sort(key=lambda x: x["score"], reverse=True)
     return out[:6]
 
@@ -161,7 +280,7 @@ def fetch_nvd():
 def fetch_psirt():
     items = parse_rss(CISCO_PSIRT, "Cisco")
     items.sort(key=lambda x: x["ts"], reverse=True)
-    return items[:6]
+    return [psirt_item(x) for x in items[:6]]
 
 
 def fetch_weather():
@@ -228,7 +347,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:130px 200px 420px 330px 300px 220px 1fr 40px;row-gap:14px}
+ padding:14px;display:grid;grid-template-rows:130px 200px 420px 350px 310px 220px 1fr 40px;row-gap:14px}
 .panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:18px 22px;overflow:hidden;position:relative}
 .ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;margin-bottom:10px;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1}
 .ttl small{font-size:18px;font-weight:500;color:#7C93B2;margin-left:10px}
@@ -262,18 +381,21 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .src{font-size:17px;font-weight:700;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE}
 .t{font-size:26px;font-weight:700;line-height:1.28;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ago{font-size:17px;color:#7C93B2;text-align:right}
-.kev{display:grid;grid-template-columns:230px 1fr 130px;column-gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.kev{display:grid;grid-template-columns:215px 1fr 120px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .kev:last-child{border-bottom:0}
 .cve{font-family:Consolas,monospace;font-size:23px;font-weight:700;color:#22D3EE}
 .kev .a{font-size:24px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kev .b{font-size:17px;color:#9FB4CE;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kev .b{font-size:19px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .due{font-size:17px;text-align:right;color:#F97316;font-weight:700}
 .tag{display:inline-block;font-size:15px;font-weight:900;padding:1px 8px;border-radius:6px;margin-right:8px;vertical-align:middle}
 .tag.our{background:#F97316;color:#111}
 .tag.rw{background:#EF4444;color:#fff}
+.atk{display:inline-block;font-size:17px;font-weight:900;padding:1px 9px;border-radius:6px;margin-right:8px;vertical-align:middle}
+.l1{background:#EF4444;color:#fff}.l2{background:#F97316;color:#111}.l3{background:#FACC15;color:#111}
+.sol{color:#22D3EE;font-weight:700}
 .two{display:grid;grid-template-columns:1fr 1fr;column-gap:14px}
 .two .panel{padding:16px 18px}
-.mini{padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:20px;line-height:1.3}
+.mini{padding:4px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:20px;line-height:1.3}
 .mini:last-child{border-bottom:0}
 .mini b{display:inline-block;min-width:54px;text-align:center;border-radius:6px;margin-right:8px;padding:0 6px;font-size:19px}
 .sc9{background:#EF4444;color:#fff}.sc7{background:#F97316;color:#111}
@@ -292,8 +414,27 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 <div id="board">
   <div id="head">
     <div class="brand">
-      <svg width="76" height="84" viewBox="0 0 76 84"><polygon points="38,2 72,21 72,63 38,82 4,63 4,21" fill="none" stroke="#22D3EE" stroke-width="4"/><polygon points="38,18 58,29 58,53 38,64 18,53 18,29" fill="#F97316"/></svg>
-      <div><b>(주)비테크놀로지</b><span>BEE TECHNOLOGY | 오늘의 보안 브리핑</span></div>
+      <svg width="370" height="100" viewBox="0 0 370 100" style="border-radius:14px">
+        <defs>
+          <linearGradient id="lgO" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F9A83F"/><stop offset="1" stop-color="#E8590C"/></linearGradient>
+          <linearGradient id="lgG1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#C9C9C9"/><stop offset="1" stop-color="#9A9A9A"/></linearGradient>
+          <linearGradient id="lgG2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8E8E8E"/><stop offset="1" stop-color="#5F5F5F"/></linearGradient>
+          <linearGradient id="lgG3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#E3E3E3"/><stop offset="1" stop-color="#BDBDBD"/></linearGradient>
+        </defs>
+        <rect width="370" height="100" rx="14" fill="#FFFFFF"/>
+        <g stroke="#FFFFFF" stroke-width="2.6" stroke-linejoin="round">
+          <polygon points="48,6 86.1,28 63.6,41 48,32" fill="url(#lgO)"/>
+          <polygon points="86.1,28 86.1,72 63.6,59 63.6,41" fill="url(#lgG1)"/>
+          <polygon points="86.1,72 48,94 48,68 63.6,59" fill="url(#lgG2)"/>
+          <polygon points="48,94 9.9,72 32.4,59 48,68" fill="url(#lgG1)"/>
+          <polygon points="9.9,72 9.9,28 32.4,41 32.4,59" fill="url(#lgG3)"/>
+          <polygon points="9.9,28 48,6 48,32 32.4,41" fill="url(#lgG3)"/>
+          <polygon points="48,32 63.6,41 63.6,59 48,68 32.4,59 32.4,41" fill="#ECECEC"/>
+        </g>
+        <text x="106" y="58" font-family="'Malgun Gothic','Noto Sans KR',sans-serif" font-size="29" font-weight="900" fill="#555555">(주)비테크놀로지</text>
+        <text x="108" y="83" font-family="Arial,'Noto Sans KR',sans-serif" font-size="17" font-weight="700" letter-spacing="1.6" fill="#666666">BEE TECHNOLOGY</text>
+      </svg>
+      <div style="margin-left:22px"><b style="font-size:34px">오늘의 보안 브리핑</b><span>Daily Security Briefing</span></div>
     </div>
     <div class="clock"><div id="clock">--:--</div><div id="date"></div><div id="range"></div></div>
   </div>
@@ -302,7 +443,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 
   <div class="panel"><div class="ttl">오늘의 보안뉴스<small>어제·오늘</small></div><div id="news"></div></div>
 
-  <div class="panel"><div class="ttl">긴급 취약점<small>CISA 실제 악용(KEV) 최신</small></div><div id="kev"></div></div>
+  <div class="panel"><div class="ttl">긴급 취약점<small>실제 공격에 악용 중 · 위험 유형과 우리 대응 솔루션</small></div><div id="kev"></div></div>
 
   <div class="two">
     <div class="panel"><div class="ttl">신규 Critical CVE<small>NVD</small></div><div id="nvd"></div></div>
@@ -366,17 +507,17 @@ function render(d){
  for(var i=0;i<n.length;i++)h+='<div class="row"><span class="src">'+esc(n[i].src)+'</span><div class="t">'+esc(n[i].title)+'</div><span class="ago">'+ago(n[i].ts)+'</span></div>';
  $('news').innerHTML=h||'<div class="empty">뉴스 데이터 없음</div>';
 
- var k=(d.kev||[]).slice(0,5);h='';
+ var k=(d.kev||[]).slice(0,4);h='';
  for(i=0;i<k.length;i++){var v=k[i];
-  h+='<div class="kev"><div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.name)+'</div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div></div>'}
+  h+='<div class="kev"><div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div></div>'}
  $('kev').innerHTML=h||'<div class="empty">KEV 데이터 없음</div>';
 
  var nv=(d.nvd||[]).slice(0,3);h='';
- for(i=0;i<nv.length;i++)h+='<div class="mini"><b class="'+(nv[i].score>=9?'sc9':'sc7')+'">'+nv[i].score+'</b><span style="color:#22D3EE;font-weight:700">'+esc(nv[i].cve)+'</span><div class="tx" style="font-size:17px;color:#9FB4CE">'+esc(nv[i].desc)+'</div></div>';
+ for(i=0;i<nv.length;i++)h+='<div class="mini"><b class="'+(nv[i].score>=9?'sc9':'sc7')+'">'+nv[i].score+'</b><span class="atk l'+(nv[i].lvl||3)+'">'+esc(nv[i].atk)+'</span><span style="color:#22D3EE;font-weight:700;font-size:17px">'+esc(nv[i].cve)+'</span><div style="font-size:18px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(nv[i].cat)+' · '+esc(nv[i].eff)+'</div><div style="font-size:14px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(nv[i].prod)+'</div></div>';
  $('nvd').innerHTML=h||'<div class="empty">최근 2일간 신규 Critical 없음</div>';
 
  var ps=(d.psirt||[]).slice(0,3);h='';
- for(i=0;i<ps.length;i++)h+='<div class="mini"><div class="tx">'+esc(ps[i].title)+'</div><span style="font-size:15px;color:#7C93B2">'+ago(ps[i].ts)+'</span></div>';
+ for(i=0;i<ps.length;i++)h+='<div class="mini"><span class="atk l'+(ps[i].lvl||3)+'">'+esc(ps[i].atk)+'</span>'+(ps[i].sev?'<span class="atk '+(ps[i].sev=='치명'||ps[i].sev=='높음'?'l1':'l3')+'">'+esc(ps[i].sev)+'</span>':'')+'<span style="font-size:18px;color:#C7D6EA">'+esc(ps[i].eff)+'</span><div style="font-size:15px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(ps[i].title)+' · '+ago(ps[i].ts)+'</div></div>';
  $('psirt').innerHTML=h||'<div class="empty">Cisco 권고 데이터 없음</div>';
 
  var mine=(d.news||[]).filter(function(x){return x.mine}).slice(0,3);h='';
