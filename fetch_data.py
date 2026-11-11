@@ -4,13 +4,15 @@
 비테크놀로지 보안 전광판 - 수집기 + 화면 생성기 (GitHub Actions 용)
 
 실행하면 site/ 폴더에 두 파일을 만듭니다.
-  site/data.json   : 뉴스 / CISA KEV / NVD / Cisco 권고 / 부산 날씨
+  site/data.json   : 뉴스 / CISA KEV / NVD / Cisco 권고 / 부산 보안 행사 / 부산 날씨
   site/index.html  : 1080x1920 세로 전광판 화면 (data.json 을 60초마다 다시 읽음)
 
+부산 행사는 저장소 최상위의 events.json 에 직접 등록합니다 (없어도 동작).
+  [{"date":"2026-11-20","end":"2026-11-21","time":"10:00","title":"행사명","place":"벡스코","link":"https://..."}]
+  - end, time, place, link 는 생략 가능. 날짜가 지난 행사는 자동으로 숨겨집니다.
+
 외부 라이브러리 없이 파이썬 3 표준 라이브러리만 사용합니다.
-로컬 테스트:  python fetch_data.py  ->  site/index.html 을 크롬에서 열기
-             (파일로 직접 열면 data.json 을 못 읽을 수 있으니,
-              site 폴더에서  python -m http.server 8080  후 http://localhost:8080 )
+로컬 테스트:  python fetch_data.py  ->  site 폴더에서  python -m http.server 8080
 """
 import email.utils
 import html
@@ -26,13 +28,14 @@ from pathlib import Path
 
 # ----------------------------- 설정 -----------------------------
 NEWS_FEEDS = [
-    ("보안뉴스", "http://www.boannews.com/media/news_rss.xml"),
+    ("보안뉴스", "https://www.boannews.com/rss/allArticle.xml"),
     ("데일리시큐", "https://www.dailysecu.com/rss/allArticle.xml"),
     ("KISA", "https://knvd.krcert.or.kr/rss/securityNotice.do"),  # 실패하면 줄을 지워도 됩니다
 ]
 CISCO_PSIRT = "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml"
-KEV_URL = "https://www.cisco.com/../" if False else "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 BUSAN = (35.1796, 129.0756)
+EVENTS_FILE = Path("events.json")
 
 # 취급 솔루션 관련 뉴스 필터 키워드 (소문자로 비교)
 MY_KEYWORDS = [
@@ -40,6 +43,12 @@ MY_KEYWORDS = [
     "악스게이트", "axgate", "시스코", "cisco", "넷앤드", "netand", "umbrella", "meraki", "firepower",
     "edr", "nac", "ztna", "vpn", "방화벽", "웹쉘", "웹셸", "접근통제", "취약점 진단", "침입방지", "ips",
 ]
+
+# 부산 보안 행사 뉴스 자동 보충용 키워드 (제목에 지역어 + 행사어가 함께 있어야 하고, 종료 표현이 없어야 함)
+BUSAN_KW = ["부산", "부울경", "동남권", "벡스코", "bexco", "영남권"]
+EVENT_KW = ["세미나", "교육", "컨퍼런스", "콘퍼런스", "행사", "포럼", "설명회", "웨비나", "해커톤",
+            "공격방어대회", "워크숍", "아카데미", "모집", "개최 예정", "개최한다", "열린다"]
+PAST_KW = ["성료", "마쳐", "마치", "성황", "폐막", "막내렸", "막 내렸", "참가해", "참가했"]
 
 OUT = Path("site")
 UA = {"User-Agent": "Mozilla/5.0 (BeeBoard/1.0)"}
@@ -237,6 +246,7 @@ def fetch_news():
         seen.add(key)
         low = it["title"].lower()
         it["mine"] = any(k in low for k in MY_KEYWORDS)
+        it.pop("desc", None)
         uniq.append(it)
     cutoff = time.time() - 48 * 3600
     recent = [x for x in uniq if x["ts"] >= cutoff]
@@ -283,6 +293,55 @@ def fetch_psirt():
     return [psirt_item(x) for x in items[:6]]
 
 
+def fetch_events():
+    """부산 보안 행사: 1) events.json 직접 등록분(날짜순)  2) 뉴스에서 찾은 관련 소식"""
+    today = dt.datetime.now(KST).date()
+    out = []
+    if EVENTS_FILE.exists():
+        try:
+            arr = json.loads(EVENTS_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            print("[경고] events.json 형식 오류:", e)
+            arr = []
+        for e in arr:
+            try:
+                s = dt.date.fromisoformat(str(e["date"]))
+                en = dt.date.fromisoformat(str(e.get("end") or e["date"]))
+            except Exception:
+                continue
+            if en < today:
+                continue
+            out.append({"kind": "event", "date": s.isoformat(), "end": en.isoformat(),
+                        "time": e.get("time", ""), "title": e.get("title", ""),
+                        "place": e.get("place", ""), "link": e.get("link", "")})
+    out.sort(key=lambda x: (x["date"], x["title"]))
+
+    found, seen = [], set()
+    cutoff = time.time() - 14 * 86400
+    for name, url in NEWS_FEEDS:
+        try:
+            items = parse_rss(url, name)
+        except Exception:
+            continue
+        for it in items:
+            t = it["title"]
+            low = t.lower()
+            if it["ts"] < cutoff:
+                continue
+            if not any(k in low for k in BUSAN_KW) or not any(k in t for k in EVENT_KW):
+                continue
+            if any(k in t for k in PAST_KW):
+                continue
+            key = re.sub(r"\W", "", t)[:30]
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append({"kind": "news", "src": it["src"], "title": t, "link": it["link"], "ts": it["ts"]})
+    found.sort(key=lambda x: x["ts"], reverse=True)
+    print("행사: 등록", len(out), "건 / 뉴스 후보", len(found), "건")
+    return out[:10] + found[:5]
+
+
 def fetch_weather():
     q = urllib.parse.urlencode({
         "latitude": BUSAN[0], "longitude": BUSAN[1],
@@ -319,7 +378,7 @@ def main():
     prev = load_prev()
     data = {"generated": int(time.time()), "errors": []}
     jobs = (("news", fetch_news, []), ("kev", fetch_kev, []), ("nvd", fetch_nvd, []),
-            ("psirt", fetch_psirt, []), ("weather", fetch_weather, {}))
+            ("psirt", fetch_psirt, []), ("events", fetch_events, []), ("weather", fetch_weather, {}))
     for key, fn, empty in jobs:
         try:
             data[key] = fn()
@@ -332,7 +391,7 @@ def main():
     (OUT / "data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     (OUT / "index.html").write_text(INDEX_HTML, encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
-    print("완료:", len(data["news"]), "news,", len(data["kev"]), "kev")
+    print("완료:", len(data["news"]), "news,", len(data["kev"]), "kev,", len(data["events"]), "events")
 
 
 # ----------------------------- 화면 (TV 브라우저 호환을 위해 단순 문법 사용) -----------------------------
@@ -347,7 +406,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:130px 200px 420px 350px 310px 220px 1fr 40px;row-gap:14px}
+ padding:14px;display:grid;grid-template-rows:130px 190px 380px 350px 300px 190px 1fr 40px;row-gap:14px}
 .panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:18px 22px;overflow:hidden;position:relative}
 .ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;margin-bottom:10px;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1}
 .ttl small{font-size:18px;font-weight:500;color:#7C93B2;margin-left:10px}
@@ -362,12 +421,12 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 #date{font-size:26px;font-weight:700;margin-top:4px}
 #range{font-size:18px;color:#7C93B2}
 /* weather */
-#wx{display:grid;grid-template-columns:270px 1fr;column-gap:18px;padding:14px 18px}
+#wx{display:grid;grid-template-columns:270px 1fr;column-gap:18px;padding:12px 18px}
 .now{border-right:1px solid rgba(34,211,238,.18);padding-right:14px}
-.now .big{font-size:76px;font-weight:900;line-height:1;margin-top:6px}
+.now .big{font-size:70px;font-weight:900;line-height:1;margin-top:6px}
 .now .cond{font-size:24px;font-weight:700;color:#A9C1DE}
 .week{display:grid;grid-template-columns:repeat(7,1fr);column-gap:8px}
-.day{text-align:center;border-radius:14px;padding:8px 2px;background:rgba(255,255,255,.04)}
+.day{text-align:center;border-radius:14px;padding:6px 2px;background:rgba(255,255,255,.04)}
 .day.today{border:2px solid #22D3EE;background:rgba(34,211,238,.1)}
 .day.rain{background:rgba(59,130,246,.22)}
 .day .dn{font-size:22px;font-weight:700}
@@ -378,6 +437,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 /* rows */
 .row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .row:last-child{border-bottom:0}
+.row.p6{padding:6px 0}
 .src{font-size:17px;font-weight:700;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE}
 .t{font-size:26px;font-weight:700;line-height:1.28;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ago{font-size:17px;color:#7C93B2;text-align:right}
@@ -399,13 +459,23 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .mini:last-child{border-bottom:0}
 .mini b{display:inline-block;min-width:54px;text-align:center;border-radius:6px;margin-right:8px;padding:0 6px;font-size:19px}
 .sc9{background:#EF4444;color:#fff}.sc7{background:#F97316;color:#111}
-.mini .tx{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .mine .t{font-size:23px}
 .empty{color:#7C93B2;font-size:20px;padding:10px 0}
-/* tip */
-#tip{background:linear-gradient(90deg,rgba(34,211,238,.18),rgba(15,28,52,.85));display:flex;align-items:center}
-#tip .lb{font-size:22px;font-weight:900;color:#22D3EE;margin-right:18px;white-space:nowrap}
-#tip .tx{font-size:27px;font-weight:700;line-height:1.35}
+/* 부산 행사 */
+.ev{display:grid;grid-template-columns:175px 1fr 96px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.ev:last-child{border-bottom:0}
+.ev .dt{font-size:21px;font-weight:900;color:#22D3EE;white-space:nowrap}
+.ev .dt.nw{color:#7C93B2;font-weight:700}
+.ev .tt2{font-size:24px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ev .pl{font-size:18px;font-weight:500;color:#7C93B2;margin-left:8px}
+.ev .bd{font-size:18px;font-weight:900;text-align:center;border-radius:8px;padding:3px 0;background:rgba(34,211,238,.15);color:#22D3EE}
+.ev .bd.hot{background:#EF4444;color:#fff}
+.ev .bd.soon{background:#F97316;color:#111}
+.ev .bd.nw{background:rgba(255,255,255,.08);color:#9FB4CE;font-weight:500;font-size:16px}
+/* 링크 */
+a.lk{color:inherit;text-decoration:none;cursor:pointer}
+a.mini{display:block}
+a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius:8px;background:rgba(34,211,238,.08)}
 #foot{display:flex;justify-content:space-between;align-items:center;font-size:18px;color:#7C93B2;padding:0 10px}
 #foot .bad{color:#EF4444;font-weight:900}
 </style>
@@ -452,7 +522,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 
   <div class="panel mine"><div class="ttl">우리 솔루션 관련 뉴스<small>지니언스·AXGATE·SSR·넷앤드·Ai-Spera·Cisco</small></div><div id="mine"></div></div>
 
-  <div id="tip" class="panel"><div class="lb">오늘의 보안 수칙</div><div class="tx" id="tiptx"></div></div>
+  <div class="panel"><div class="ttl">부산 보안 행사<small>세미나·교육·컨퍼런스</small></div><div id="events"></div></div>
 
   <div id="foot"><span id="upd">데이터 확인 중...</span><span>BEE TECHNOLOGY Security Board</span></div>
 </div>
@@ -465,14 +535,17 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return
 function fit(){var s=Math.min(window.innerWidth/W,window.innerHeight/H);$('board').style.transform='translate(-50%,-50%) scale('+s+')'}
 window.addEventListener('resize',fit);fit();
 
-var TIPS=[ '출처가 불분명한 첨부파일과 링크는 열지 마세요. 단말 이상행위는 EDR(지니언스)로 즉시 탐지합니다.', 'SSL-VPN과 방화벽 장비는 최신 펌웨어로 유지하세요. 실제 악용 취약점은 며칠 안에 공격됩니다.', '관리자 계정에는 MFA를 적용하세요. 계정과 접근 이력은 넷앤드 PSM·PAM·IM으로 통제합니다.', '홈페이지 웹쉘과 위변조를 점검하세요. MetiEye로 소스 변경을 실시간 탐지할 수 있습니다.', '외부에 노출된 자산을 정기적으로 확인하세요. Ai-Spera ASM이 보이지 않는 공격면을 찾아줍니다.', 'IT 인프라 취약점은 분기마다 진단하세요. SolidStep CCE/CVE로 설정 점검을 자동화합니다.', '메일 첨부와 URL은 샌드박스로 검사하세요. Cisco ESA와 Umbrella가 피싱과 APT를 차단합니다.'];
+var NVD='https://nvd.nist.gov/vuln/detail/';
+/* 링크가 있으면 새 탭으로 열리는 <a>, 없으면 일반 <div> */
+function A(cls,url,inner){
+ if(!/^https?:\/\//i.test(url||''))return '<div class="'+cls+'">'+inner+'</div>';
+ return '<a class="'+cls+' lk" href="'+esc(url)+'" target="_blank" rel="noopener">'+inner+'</a>'}
 
 function tick(){
  var d=new Date(),y=new Date(d.getTime()-864e5);
  $('clock').textContent=pad(d.getHours())+':'+pad(d.getMinutes());
  $('date').textContent=d.getFullYear()+'.'+pad(d.getMonth()+1)+'.'+pad(d.getDate())+' ('+DAYS[d.getDay()]+')';
  $('range').textContent='기준 '+pad(y.getMonth()+1)+'/'+pad(y.getDate())+' ~ '+pad(d.getMonth()+1)+'/'+pad(d.getDate());
- var idx=Math.floor(d.getTime()/864e5)%TIPS.length;$('tiptx').textContent=TIPS[idx];
  if(DATA){var m=Math.floor((d.getTime()/1000-DATA.generated)/60),el=$('upd');
   if(m>60){el.innerHTML='<span class="bad">갱신 지연 ('+m+'분 전 데이터)</span>'}
   else{el.textContent='마지막 갱신 '+(m<1?'방금':m+'분 전')+(DATA.errors&&DATA.errors.length?' (일부 수집 실패: '+DATA.errors.join(', ')+')':'')}}
@@ -493,36 +566,58 @@ function ico(c,s){var k=kind(c),b='';
  else b=CL+'<g stroke="#60A5FA" stroke-width="3.5" stroke-linecap="round"><path d="M20 43l-3 8M30 43l-3 8M40 43l-3 8"/></g>';
  return '<svg width="'+s+'" height="'+s+'" viewBox="0 0 56 56">'+b+'</svg>'}
 
+function todayStr(){var t=new Date();return t.getFullYear()+'-'+pad(t.getMonth()+1)+'-'+pad(t.getDate())}
+function dnum(s){var p=s.split('-');return Date.UTC(+p[0],+p[1]-1,+p[2])/864e5}
+function md(s){var p=s.split('-'),dd=new Date(+p[0],+p[1]-1,+p[2]);return pad(+p[1])+'/'+pad(+p[2])+'('+DAYS[dd.getDay()]+')'}
+
 function renderWx(w){
  if(!w||!w.days){$('wx').innerHTML='<div class="empty">날씨 데이터 없음</div>';return}
- var today=new Date(),ts=today.getFullYear()+'-'+pad(today.getMonth()+1)+'-'+pad(today.getDate());
- var h='<div class="now"><div class="ttl" style="margin-bottom:0">부산 날씨</div><div style="display:flex;align-items:center">'+ico(w.code,72)+'<div class="big" style="margin-left:6px">'+w.temp+'°</div></div><div class="cond">'+label(w.code)+' · 최고 '+w.days[0].max+'° / 최저 '+w.days[0].min+'°</div></div><div class="week">';
+ var ts=todayStr();
+ var h='<div class="now"><div class="ttl" style="margin-bottom:0">부산 날씨</div><div style="display:flex;align-items:center">'+ico(w.code,64)+'<div class="big" style="margin-left:6px">'+w.temp+'°</div></div><div class="cond">'+label(w.code)+' · 최고 '+w.days[0].max+'° / 최저 '+w.days[0].min+'°</div></div><div class="week">';
  for(var i=0;i<w.days.length;i++){var d=w.days[i],dt=new Date(d.date+'T00:00:00'),rain=kind(d.code)=='rain'||kind(d.code)=='snow';
-  h+='<div class="day'+(d.date==ts?' today':'')+(rain?' rain':'')+'"><div class="dn">'+(d.date==ts?'오늘':DAYS[dt.getDay()])+'</div><div class="dd">'+pad(dt.getMonth()+1)+'/'+pad(dt.getDate())+'</div>'+ico(d.code,52)+'<div class="tt">'+d.max+'° <i>'+d.min+'°</i></div><div class="pp">강수 '+d.pop+'%</div></div>'}
+  h+='<div class="day'+(d.date==ts?' today':'')+(rain?' rain':'')+'"><div class="dn">'+(d.date==ts?'오늘':DAYS[dt.getDay()])+'</div><div class="dd">'+pad(dt.getMonth()+1)+'/'+pad(dt.getDate())+'</div>'+ico(d.code,46)+'<div class="tt">'+d.max+'° <i>'+d.min+'°</i></div><div class="pp">강수 '+d.pop+'%</div></div>'}
  $('wx').innerHTML=h+'</div>'}
+
+function renderEvents(list){
+ var ts=todayStr(),tn=dnum(ts),h='',cnt=0;
+ for(var i=0;i<(list||[]).length&&cnt<3;i++){var e=list[i];
+  if(e.kind=='event'){
+   if(e.end<ts)continue;
+   var sd=dnum(e.date),ed=dnum(e.end),bd,bc='';
+   if(tn>=sd&&tn<=ed){bd=(sd==ed)?'오늘':'진행중';bc=' hot'}
+   else{var df=sd-tn;bd='D-'+df;if(df<=7)bc=' soon'}
+   var dtx=md(e.date)+(e.end!=e.date?'~'+md(e.end).slice(0,5):'')+(e.time?' '+esc(e.time):'');
+   h+=A('ev',e.link,'<span class="dt">'+dtx+'</span><div class="tt2">'+esc(e.title)+(e.place?'<span class="pl">'+esc(e.place)+'</span>':'')+'</div><span class="bd'+bc+'">'+bd+'</span>');
+  }else{
+   h+=A('ev',e.link,'<span class="dt nw">관련 소식</span><div class="tt2">'+esc(e.title)+'</div><span class="bd nw">'+ago(e.ts)+'</span>');
+  }
+  cnt++}
+ $('events').innerHTML=h||'<div class="empty">예정된 부산 보안 행사 정보를 준비 중입니다</div>'}
 
 function render(d){
  renderWx(d.weather);
- var n=(d.news||[]).slice(0,5),h='';
- for(var i=0;i<n.length;i++)h+='<div class="row"><span class="src">'+esc(n[i].src)+'</span><div class="t">'+esc(n[i].title)+'</div><span class="ago">'+ago(n[i].ts)+'</span></div>';
+ var n=(d.news||[]).slice(0,4),h='';
+ for(var i=0;i<n.length;i++)h+=A('row',n[i].link,'<span class="src">'+esc(n[i].src)+'</span><div class="t">'+esc(n[i].title)+'</div><span class="ago">'+ago(n[i].ts)+'</span>');
  $('news').innerHTML=h||'<div class="empty">뉴스 데이터 없음</div>';
 
  var k=(d.kev||[]).slice(0,4);h='';
  for(i=0;i<k.length;i++){var v=k[i];
-  h+='<div class="kev"><div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div></div>'}
+  h+=A('kev',NVD+v.cve,'<div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div>')}
  $('kev').innerHTML=h||'<div class="empty">KEV 데이터 없음</div>';
 
  var nv=(d.nvd||[]).slice(0,3);h='';
- for(i=0;i<nv.length;i++)h+='<div class="mini"><b class="'+(nv[i].score>=9?'sc9':'sc7')+'">'+nv[i].score+'</b><span class="atk l'+(nv[i].lvl||3)+'">'+esc(nv[i].atk)+'</span><span style="color:#22D3EE;font-weight:700;font-size:17px">'+esc(nv[i].cve)+'</span><div style="font-size:18px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(nv[i].cat)+' · '+esc(nv[i].eff)+'</div><div style="font-size:14px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(nv[i].prod)+'</div></div>';
+ for(i=0;i<nv.length;i++)h+=A('mini',NVD+nv[i].cve,'<b class="'+(nv[i].score>=9?'sc9':'sc7')+'">'+nv[i].score+'</b><span class="atk l'+(nv[i].lvl||3)+'">'+esc(nv[i].atk)+'</span><span style="color:#22D3EE;font-weight:700;font-size:17px">'+esc(nv[i].cve)+'</span><div style="font-size:18px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(nv[i].cat)+' · '+esc(nv[i].eff)+'</div><div style="font-size:14px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(nv[i].prod)+'</div>');
  $('nvd').innerHTML=h||'<div class="empty">최근 2일간 신규 Critical 없음</div>';
 
  var ps=(d.psirt||[]).slice(0,3);h='';
- for(i=0;i<ps.length;i++)h+='<div class="mini"><span class="atk l'+(ps[i].lvl||3)+'">'+esc(ps[i].atk)+'</span>'+(ps[i].sev?'<span class="atk '+(ps[i].sev=='치명'||ps[i].sev=='높음'?'l1':'l3')+'">'+esc(ps[i].sev)+'</span>':'')+'<span style="font-size:18px;color:#C7D6EA">'+esc(ps[i].eff)+'</span><div style="font-size:15px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(ps[i].title)+' · '+ago(ps[i].ts)+'</div></div>';
+ for(i=0;i<ps.length;i++)h+=A('mini',ps[i].link,'<span class="atk l'+(ps[i].lvl||3)+'">'+esc(ps[i].atk)+'</span>'+(ps[i].sev?'<span class="atk '+(ps[i].sev=='치명'||ps[i].sev=='높음'?'l1':'l3')+'">'+esc(ps[i].sev)+'</span>':'')+'<span style="font-size:18px;color:#C7D6EA">'+esc(ps[i].eff)+'</span><div style="font-size:15px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(ps[i].title)+' · '+ago(ps[i].ts)+'</div>');
  $('psirt').innerHTML=h||'<div class="empty">Cisco 권고 데이터 없음</div>';
 
- var mine=(d.news||[]).filter(function(x){return x.mine}).slice(0,3);h='';
- for(i=0;i<mine.length;i++)h+='<div class="row" style="padding:6px 0"><span class="src">'+esc(mine[i].src)+'</span><div class="t">'+esc(mine[i].title)+'</div><span class="ago">'+ago(mine[i].ts)+'</span></div>';
+ var mine=(d.news||[]).filter(function(x){return x.mine}).slice(0,2);h='';
+ for(i=0;i<mine.length;i++)h+=A('row p6',mine[i].link,'<span class="src">'+esc(mine[i].src)+'</span><div class="t">'+esc(mine[i].title)+'</div><span class="ago">'+ago(mine[i].ts)+'</span>');
  $('mine').innerHTML=h||'<div class="empty">오늘 해당 키워드 뉴스가 없습니다</div>';
+
+ renderEvents(d.events);
  tick()}
 
 function load(){
