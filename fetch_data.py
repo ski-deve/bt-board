@@ -508,7 +508,9 @@ def main():
         data["stats"] = prev.get("stats", {})
     OUT.mkdir(exist_ok=True)
     (OUT / "data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    (OUT / "index.html").write_text(INDEX_HTML, encoding="utf-8")
+    # 화면 쪽 자바스크립트에는 파이썬 변수가 없으므로, AUTO 설정값을 여기서 끼워 넣는다
+    page = INDEX_HTML.replace("__AUTO__", json.dumps(AUTO))
+    (OUT / "index.html").write_text(page, encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
     print("완료:", len(data["news"]), "news,", len(data["kev"]), "kev,", len(data["events"]), "events")
 
@@ -721,6 +723,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
 
 <script>
 var W=1080,H=1920,DATA=null,DAYS=['일','월','화','수','목','금','토'];
+var AUTO=__AUTO__;
 function $(id){return document.getElementById(id)}
 function pad(n){return n<10?'0'+n:''+n}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -897,7 +900,7 @@ function render(d){
 
 function load(){
  var x=new XMLHttpRequest();x.open('GET','data.json?'+Date.now(),true);
- x.onload=function(){try{DATA=JSON.parse(x.responseText);render(DATA)}catch(e){}};
+ x.onload=function(){try{DATA=JSON.parse(x.responseText);render(DATA)}catch(e){if(window.console)console.log('render error',e)}};
  x.send()}
 load();setInterval(load,60000);setInterval(tick,1000);tick();
 setTimeout(function(){location.reload()},6*3600*1000); /* 6시간마다 전체 새로고침 (TV 브라우저 멈춤 방지) */
