@@ -7,18 +7,14 @@
   site/data.json   : 보안뉴스 / CISA KEV / NVD / Cisco 권고 / 국내 보안행사 / 부산 날씨 / 통계
   site/index.html  : 1080x1920 세로 전광판 화면 (data.json 을 60초마다 다시 읽음)
 
-국내 보안행사
+국내 보안행사 (우선순위 순서로 표시)
   1) events.json 에 직접 등록한 행사 (확정 일정, 날짜가 지나면 자동 숨김)
-  2) 검색(Google 뉴스 RSS)으로 찾은 교육·세미나·컨퍼런스 모집·공지 (참고용 후보, 날짜는 기사 보도일)
+  2) 벡스코 행사일정 중 보안 관련 행사 (날짜 포함, D-day 표시)
+  3) 부산 기관 게시판(TARGET_SITES)의 보안 관련 교육·세미나·행사 공고 (게시일 표시, 일정은 원문 확인)
+  4) (선택) 뉴스 검색 후보 - USE_NEWS_SEARCH = True 일 때만
   events.json 예시:
   [{"date":"2026-12-03","end":"2026-12-03","time":"14:00","title":"행사명","place":"장소","link":"https://...","type":"교육"}]
   - end, time, place, link, type 은 생략 가능. type 생략 시 제목으로 자동 분류합니다.
-
-화면 동작
-  - 상태 바: 위협 수준(자체 산정), 최근 2일 신규 악용, Critical CVE, 취급 제품 해당 건수(CVE 번호 표시)
-  - 보안뉴스 / 긴급 취약점 / 국내 보안행사: ‹ › 버튼 또는 좌우 드래그로 넘김 (AUTO 값을 키우면 자동 넘김)
-  - 하단 티커: 뉴스, CVE, 행사가 가로로 계속 흐릅니다.
-  - 도넛 차트: 최근 30일 CISA 악용 취약점의 공격 유형 비율
 
 외부 라이브러리 없이 파이썬 3 표준 라이브러리만 사용합니다.
 로컬 테스트:  python fetch_data.py  ->  site 폴더에서  python -m http.server 8080
@@ -51,23 +47,69 @@ EVENTS_FILE = Path("events.json")
 THREAT_MID = 5     # 이 점수 이상이면 "주의"
 THREAT_HIGH = 10   # 이 점수 이상이면 "경계"
 
-# 자동 넘김 간격(초). 0 이면 끔 (기본: 수동 넘김)
+# 자동 넘김 간격(초). 0 이면 끔 (기본: 수동 넘김 - 버튼 또는 좌우 드래그)
 AUTO = {"news": 0, "kev": 0, "events": 0}
 
-# 국내 보안행사 검색 (Google 뉴스 검색 RSS, 한국 기준)
-EVENT_SEARCH = [    "https://news.google.com/rss/search?q=" + urllib.parse.quote(        "보안 세미나 OR 정보보호 세미나 OR 사이버보안 세미나 OR 보안 컨퍼런스 OR 정보보호 컨퍼런스")    + "&hl=ko&gl=KR&ceid=KR:ko",    "https://news.google.com/rss/search?q=" + urllib.parse.quote(        "보안 교육 모집 OR 사이버보안 교육 모집 OR 정보보호 교육 신청 OR 보안 웨비나 OR 정보보호 설명회")    + "&hl=ko&gl=KR&ceid=KR:ko",    "https://news.google.com/rss/search?q=" + urllib.parse.quote(        "KISA 교육 OR 한국인터넷진흥원 교육 모집 OR 정보보호 아카데미 OR 사이버보안 실무 교육")    + "&hl=ko&gl=KR&ceid=KR:ko",]
-EVENT_WORDS = ["세미나", "교육", "컨퍼런스", "콘퍼런스", "워크숍", "웨비나", "설명회", "포럼", "아카데미",               "해커톤", "강좌", "강연", "실습"]
+# ---- 국내 보안행사 수집 대상 (부산 기관 게시판) ----
+#   require_param : 게시글 링크(또는 속성)에 이 문자열이 있는 항목만 게시글로 인정
+#   need_event    : True 면 제목에 행사 단어(세미나, 교육, 모집 등)도 있어야 통과
+#   label         : 화면에 표시할 짧은 이름
+TARGET_SITES = [
+    {"name": "부산정보산업진흥원_ICT교육", "label": "BIPA 교육",
+     "url": "https://bipa.kr/board/training/list", "domain": "https://bipa.kr",
+     "require_param": "seq=", "need_event": False},
+    {"name": "부산정보산업진흥원_일반공고", "label": "BIPA 공고",
+     "url": "https://bipa.kr/board/notice/list", "domain": "https://bipa.kr",
+     "require_param": "seq=", "need_event": True},
+    {"name": "부산경제진흥원_소상공인디지털", "label": "BEPA",
+     "url": "https://www.bepa.kr/kor/view.do?no=1502", "domain": "https://www.bepa.kr",
+     "require_param": "idx=", "need_event": True},
+    {"name": "부산경제진흥원_기업지원사업", "label": "BEPA",
+     "url": "https://www.bepa.kr/kor/view.do?no=1505", "domain": "https://www.bepa.kr",
+     "require_param": "idx=", "need_event": True},
+    {"name": "부산과학기술고등교육진흥원_사업", "label": "BISTEP",
+     "url": "https://www.bistep.re.kr/board.es?mid=a10301010000&bid=0002", "domain": "https://www.bistep.re.kr",
+     "require_param": "nttSn=", "need_event": True},
+    {"name": "부산상공회의소_교육행사", "label": "부산상의",
+     "url": "https://www.bcci.or.kr/", "domain": "https://www.bcci.or.kr",
+     "require_param": "seq=", "need_event": True},
+    {"name": "부산지방중소벤처기업청_공고", "label": "부산중기청",
+     "url": "https://www.mss.go.kr/site/busan/ex/bbs/List.do?cbIdx=277", "domain": "https://www.mss.go.kr",
+     "require_param": "seq=", "need_event": True},
+]
+# 벡스코 행사일정 (보안 관련 제목만 표시)
+BEXCO_URL = "https://www.bexco.co.kr/kor/CMS/EventScheduleMgr/list.do?mCode=MN214"
+
+# 보안 관련 키워드 (제목에 하나라도 있어야 표시, 영문은 소문자로 비교). 필요하면 AI, 클라우드 등을 추가하세요.
+SEC_KW = ["보안", "정보보호", "사이버", "해킹", "개인정보", "랜섬", "침해", "암호", "제로트러스트", "zero trust",
+          "시큐리티", "security", "isms", "ciso", "망분리", "취약점", "포렌식", "위협", "방화벽"]
+EXCLUDE_WORDS = ["입찰", "채용", "낙찰", "계약", "합격", "선정 결과", "결과 안내", "결과 공고", "용역"]
+EVENT_WORDS = ["세미나", "교육", "컨퍼런스", "콘퍼런스", "워크숍", "웨비나", "설명회", "포럼", "아카데미",
+               "해커톤", "강좌", "강연", "실습", "행사", "대회", "박람회", "전시"]
 ACTION_WORDS = ["모집", "접수", "개최", "신청", "참가", "초청", "등록", "안내", "예정", "오픈"]
 PAST_WORDS = ["성료", "마쳐", "마치", "성황", "폐막", "막내렸", "참가해", "참가했", "열렸", "진행했", "수료"]
-# 행사 종류 자동 분류 (앞에서부터 먼저 일치하는 것을 사용)
-EVENT_TYPES = [    ("웨비나", ["웨비나", "온라인 강연"]),
+EVENT_TYPES = [
+    ("웨비나", ["웨비나", "온라인 강연"]),
     ("컨퍼런스", ["컨퍼런스", "콘퍼런스"]),
     ("교육", ["교육", "강좌", "아카데미", "실습", "훈련", "과정"]),
     ("세미나", ["세미나", "포럼", "설명회", "워크숍", "강연"]),
+    ("전시", ["전시", "박람회", "엑스포"]),
+]
+
+# 뉴스 검색(Google 뉴스 RSS) 후보. 뉴스 기사가 섞이므로 기본은 끔
+USE_NEWS_SEARCH = False
+EVENT_SEARCH = [
+    "https://news.google.com/rss/search?q=" + urllib.parse.quote(
+        "보안 세미나 OR 정보보호 세미나 OR 사이버보안 세미나 OR 보안 컨퍼런스 OR 정보보호 컨퍼런스")
+    + "&hl=ko&gl=KR&ceid=KR:ko",
+    "https://news.google.com/rss/search?q=" + urllib.parse.quote(
+        "보안 교육 모집 OR 사이버보안 교육 모집 OR 정보보호 교육 신청 OR 보안 웨비나 OR 정보보호 설명회")
+    + "&hl=ko&gl=KR&ceid=KR:ko",
 ]
 
 OUT = Path("site")
-UA = {"User-Agent": "Mozilla/5.0 (BeeBoard/1.0)"}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.5"}
 KST = dt.timezone(dt.timedelta(hours=9))
 
 _KEV_CACHE = None   # KEV 원본 (한 번만 내려받아 재사용)
@@ -79,6 +121,15 @@ def http_get(url, timeout=25):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
+
+
+def decode_html(raw):
+    for enc in ("utf-8", "cp949"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "ignore")
 
 
 def to_epoch(s):
@@ -100,7 +151,7 @@ def to_epoch(s):
 
 def clean(s):
     s = html.unescape(s or "")
-    s = re.sub(r"<[^>]+>", "", s)
+    s = re.sub(r"<[^>]+>", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -328,6 +379,19 @@ def fetch_psirt():
 
 
 # ----------------------------- 수집: 국내 보안행사 -----------------------------
+DATE_RE = re.compile(r"(20\d{2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})")
+
+
+def find_dates(text):
+    out = []
+    for m in DATE_RE.finditer(text or ""):
+        try:
+            out.append(dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        except ValueError:
+            pass
+    return out
+
+
 def event_type(title, given=""):
     if given:
         return given
@@ -335,6 +399,18 @@ def event_type(title, given=""):
         if any(k in title for k in keys):
             return label
     return "행사"
+
+
+def passes(title, need_event):
+    """보안 키워드가 있고, 입찰·채용·종료 공고가 아니며, (필요하면) 행사 단어가 있어야 통과"""
+    low = title.lower()
+    if not any(k in low for k in SEC_KW):
+        return False
+    if any(w in title for w in EXCLUDE_WORDS) or any(w in title for w in PAST_WORDS):
+        return False
+    if need_event and not (any(w in title for w in EVENT_WORDS) or any(w in title for w in ACTION_WORDS)):
+        return False
+    return True
 
 
 def load_registered_events():
@@ -358,15 +434,94 @@ def load_registered_events():
         if en < today:
             continue
         title = e.get("title", "")
-        out.append({"kind": "event", "type": event_type(title, e.get("type", "")),
+        out.append({"kind": "event", "src": "등록", "type": event_type(title, e.get("type", "")),
                     "date": s.isoformat(), "end": en.isoformat(), "time": e.get("time", ""),
                     "title": title, "place": e.get("place", ""), "link": e.get("link", "")})
     out.sort(key=lambda x: (x["date"], x["title"]))
     return out[:10]
 
 
+def scrape_site(site):
+    """게시판 목록 HTML 에서 게시글 링크를 찾아 보안 관련 항목만 추출 (사이트별 구조를 몰라도 동작하는 범용 방식)"""
+    page = decode_html(http_get(site["url"], 30))
+    today = dt.datetime.now(KST).date()
+    out, seen = [], set()
+    for m in re.finditer(r"<a\b([^>]*)>(.*?)</a>", page, re.S | re.I):
+        attrs, inner = m.group(1), m.group(2)
+        if site["require_param"] not in html.unescape(attrs):
+            continue
+        title = clean(inner)
+        if len(title) < 6 or not passes(title, site.get("need_event", True)):
+            continue
+        key = re.sub(r"\W", "", title)[:30]
+        if key in seen:
+            continue
+        seen.add(key)
+        hm = re.search(r"href\s*=\s*[\"']([^\"']+)[\"']", attrs, re.I)
+        href = html.unescape(hm.group(1)).strip() if hm else ""
+        if not href or href.lower().startswith("javascript") or href.startswith("#"):
+            link = site["url"]
+        else:
+            link = urllib.parse.urljoin(site["url"], href)
+            if not link.startswith(site["domain"]):
+                link = site["url"]
+        ds = find_dates(clean(page[m.end(): m.end() + 400]))
+        posted = ds[0] if ds else None
+        if posted and (today - posted).days > 60:
+            continue
+        ts = int(dt.datetime.combine(posted, dt.time(12), KST).timestamp()) if posted else 0
+        out.append({"kind": "site", "src": site.get("label", site["name"]), "type": event_type(title),
+                    "title": title, "link": link, "ts": ts, "posted": posted.isoformat() if posted else ""})
+    return out
+
+
+def fetch_bexco():
+    """벡스코 행사일정 목록에서 보안 관련 행사만 추출 (날짜 범위 포함)"""
+    page = decode_html(http_get(BEXCO_URL, 30))
+    today = dt.datetime.now(KST).date()
+    out, seen = [], set()
+    for blk in re.findall(r"<(?:li|tr)\b.*?</(?:li|tr)>", page, re.S | re.I):
+        text = clean(blk)
+        ds = find_dates(text)
+        if not ds:
+            continue
+        s = ds[0]
+        e = ds[1] if len(ds) > 1 else ds[0]
+        if e < s:
+            e = s
+        if e < today:
+            continue
+        dm = DATE_RE.search(text)
+        head = text[:dm.start()].strip()
+        tail = DATE_RE.sub("", text[dm.end():], count=1).replace("~", " ").strip()
+        head = re.sub(r"^(?:상세보기|진행중|D-\d+|D-day|이벤트|회의|전시|공연|컨벤션|\s)+", "", head).strip()
+        for cat in (" 회의 ", " 이벤트 ", " 전시 ", " 공연 "):
+            if cat in head:
+                a, b = [p.strip() for p in head.split(cat, 1)]
+                if a and b and (a == b or a in b or b in a):
+                    head = b if len(b) >= len(a) else a
+                break
+        if len(head) < 4 or not any(k in head.lower() for k in SEC_KW):
+            continue
+        if any(w in head for w in EXCLUDE_WORDS):
+            continue
+        key = re.sub(r"\W", "", head)[:30] + s.isoformat()
+        if key in seen:
+            continue
+        seen.add(key)
+        hm = re.search(r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"']", blk, re.I)
+        href = html.unescape(hm.group(1)).strip() if hm else ""
+        link = BEXCO_URL if (not href or href.lower().startswith("javascript") or href.startswith("#")) \
+            else urllib.parse.urljoin(BEXCO_URL, href)
+        out.append({"kind": "event", "src": "벡스코", "type": event_type(head), "date": s.isoformat(),
+                    "end": e.isoformat(), "time": "", "title": head, "place": "벡스코 " + tail[:30].strip(),
+                    "link": link})
+    out.sort(key=lambda x: (x["date"], x["title"]))
+    return out[:6]
+
+
 def fetch_event_search():
-    """검색 RSS에서 교육·세미나·컨퍼런스 모집·공지 기사만 후보로 모음 (참고용)"""
+    """(선택) 검색 RSS 에서 교육·세미나·컨퍼런스 모집·공지 기사만 후보로 모음"""
     found, seen = [], set()
     cutoff = time.time() - 21 * 86400
     for url in EVENT_SEARCH:
@@ -377,13 +532,7 @@ def fetch_event_search():
             continue
         for it in items:
             t = strip_source(it["title"])
-            if it["ts"] < cutoff:
-                continue
-            if not any(w in t for w in EVENT_WORDS):
-                continue
-            if not any(w in t for w in ACTION_WORDS):
-                continue
-            if any(w in t for w in PAST_WORDS):
+            if it["ts"] < cutoff or not passes(t, True):
                 continue
             key = re.sub(r"\W", "", t)[:30]
             if key in seen:
@@ -392,18 +541,52 @@ def fetch_event_search():
             found.append({"kind": "search", "type": event_type(t), "title": t,
                           "link": it["link"], "ts": it["ts"]})
     found.sort(key=lambda x: x["ts"], reverse=True)
-    return found[:6]
+    return found[:4]
 
 
 def fetch_events():
     reg = load_registered_events()
+    fails, tried = 0, 0
+
+    bex = []
+    tried += 1
     try:
-        srch = fetch_event_search()
+        bex = fetch_bexco()
+        print("[수집] 벡스코", len(bex), "건")
     except Exception as e:
-        print("[실패] 행사 검색", e)
-        srch = []
-    print("행사: 등록", len(reg), "건 / 검색 후보", len(srch), "건")
-    return reg + srch
+        fails += 1
+        print("[실패] 벡스코", e)
+
+    sites, seen = [], set()
+    for site in TARGET_SITES:
+        tried += 1
+        try:
+            got = scrape_site(site)
+            print("[수집]", site["name"], len(got), "건")
+        except Exception as e:
+            fails += 1
+            print("[실패]", site["name"], e)
+            continue
+        for g in got:
+            key = re.sub(r"\W", "", g["title"])[:30]
+            if key not in seen:
+                seen.add(key)
+                sites.append(g)
+    sites.sort(key=lambda x: x["ts"], reverse=True)
+
+    srch = []
+    if USE_NEWS_SEARCH:
+        try:
+            srch = fetch_event_search()
+        except Exception as e:
+            print("[실패] 행사 검색", e)
+
+    allv = reg + bex + sites[:12] + srch
+    print("행사 합계: 등록", len(reg), "/ 벡스코", len(bex), "/ 기관 게시판", len(sites), "/ 검색", len(srch),
+          "/ 수집 실패", fails, "of", tried)
+    if not allv and fails > 0:
+        raise RuntimeError("행사 수집 실패 (이전 데이터 유지)")
+    return allv[:20]
 
 
 # ----------------------------- 수집: 날씨 -----------------------------
@@ -508,9 +691,8 @@ def main():
         data["stats"] = prev.get("stats", {})
     OUT.mkdir(exist_ok=True)
     (OUT / "data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    # 화면 쪽 자바스크립트에는 파이썬 변수가 없으므로, AUTO 설정값을 여기서 끼워 넣는다
-    page = INDEX_HTML.replace("__AUTO__", json.dumps(AUTO))
-    (OUT / "index.html").write_text(page, encoding="utf-8")
+    # AUTO 설정을 화면(JS)에 전달 (이 값이 없으면 화면 스크립트가 멈춰 빈 화면이 됩니다)
+    (OUT / "index.html").write_text(INDEX_HTML.replace("__AUTO__", json.dumps(AUTO)), encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
     print("완료:", len(data["news"]), "news,", len(data["kev"]), "kev,", len(data["events"]), "events")
 
@@ -711,7 +893,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
   </div>
 
   <div class="panel">
-    <div class="hd"><div class="ttl">국내 보안 행사<small>교육·세미나·컨퍼런스 · 등록 일정과 모집 공지</small></div>
+    <div class="hd"><div class="ttl">국내 보안 행사<small>교육·세미나·컨퍼런스 · 벡스코·부산 기관</small></div>
       <div class="pg"><button class="pb" onclick="nav('events',-1)">&lsaquo;</button><span class="pd" id="d-events"></span><button class="pb" onclick="nav('events',1)">&rsaquo;</button></div></div>
     <div id="events" class="fade"></div>
   </div>
@@ -722,8 +904,8 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
 </div>
 
 <script>
-var W=1080,H=1920,DATA=null,DAYS=['일','월','화','수','목','금','토'];
 var AUTO=__AUTO__;
+var W=1080,H=1920,DATA=null,DAYS=['일','월','화','수','목','금','토'];
 function $(id){return document.getElementById(id)}
 function pad(n){return n<10?'0'+n:''+n}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -775,12 +957,12 @@ function renderWx(w){
 /* ---------- 수동/자동 넘김 패널 (뉴스 · 긴급 취약점 · 국내 행사) ---------- */
 var LIST={news:[],kev:[],events:[]};
 var PER={news:3,kev:3,events:2};
-var MAXP={news:4,kev:3,events:4};
+var MAXP={news:4,kev:3,events:6};
 var PAGE={news:0,kev:0,events:0};
 var EMPTY={
  news:'<div class="empty">뉴스 데이터 없음</div>',
  kev:'<div class="empty">KEV 데이터 없음</div>',
- events:'<div class="empty">등록된 국내 보안 행사와 모집 공지가 아직 없습니다</div>'};
+ events:'<div class="empty">표시할 국내 보안 행사가 아직 없습니다 (events.json 에 직접 등록할 수 있습니다)</div>'};
 var SUPPRESS=0;
 function evHtml(e){
  var ts=todayStr(),tn=dnum(ts),t=esc(e.type||'행사');
@@ -789,7 +971,10 @@ function evHtml(e){
   if(tn>=sd&&tn<=ed){bd=(sd==ed)?'오늘':'진행중';bc=' hot'}
   else{var df=sd-tn;bd='D-'+df;if(df<=7)bc=' soon'}
   var dtx=md(e.date)+(e.end!=e.date?' ~ '+md(e.end):'')+(e.time?' '+esc(e.time):'');
-  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="dt">'+dtx+'</span><span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div>'+(e.place?'<div class="pl">'+esc(e.place)+'</div>':'')+'</div><span class="bd'+bc+'">'+bd+'</span>')}
+  var st=(e.src&&e.src!='등록')?'<span class="tg tgE">'+esc(e.src)+'</span>':'';
+  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="dt">'+dtx+'</span>'+st+'<span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div>'+(e.place?'<div class="pl">'+esc(e.place)+'</div>':'')+'</div><span class="bd'+bc+'">'+bd+'</span>')}
+ if(e.kind=='site'){
+  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">'+esc(e.src||'공고')+'</span><span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+(e.posted?md(e.posted)+' 게시 · ':'')+'일정은 원문에서 확인</div></div><span class="bd nw">공고</span>')}
  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">모집·공지</span><span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+ago(e.ts)+' 보도 · 날짜는 원문 확인</div></div><span class="bd nw">검색</span>')}
 var RENDER={
  news:function(n){return A('row',n.link,'<span class="src">'+esc(n.src)+'</span><div class="t">'+esc(n.title)+'</div><span class="ago">'+ago(n.ts)+'</span>')},
@@ -882,7 +1067,7 @@ function render(d){
  renderWx(d.weather);
  LIST.news=(d.news||[]).slice(0,12);
  LIST.kev=(d.kev||[]).slice(0,8);
- LIST.events=d.events||[];
+ LIST.events=(d.events||[]).slice(0,12);
  paint('news');paint('kev');paint('events');
 
  var i,h='',nv=(d.nvd||[]).slice(0,2);
@@ -900,7 +1085,9 @@ function render(d){
 
 function load(){
  var x=new XMLHttpRequest();x.open('GET','data.json?'+Date.now(),true);
- x.onload=function(){try{DATA=JSON.parse(x.responseText);render(DATA)}catch(e){if(window.console)console.log('render error',e)}};
+ x.onload=function(){
+  try{DATA=JSON.parse(x.responseText);render(DATA)}
+  catch(e){if(window.console)console.error('render error',e)}};
  x.send()}
 load();setInterval(load,60000);setInterval(tick,1000);tick();
 setTimeout(function(){location.reload()},6*3600*1000); /* 6시간마다 전체 새로고침 (TV 브라우저 멈춤 방지) */
