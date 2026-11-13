@@ -25,8 +25,10 @@ import json
 import math
 import os
 import re
+import ssl
 import time
 import datetime as dt
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -36,7 +38,7 @@ from pathlib import Path
 NEWS_FEEDS = [
     ("보안뉴스", "https://www.boannews.com/rss/allArticle.xml"),
     ("데일리시큐", "https://www.dailysecu.com/rss/allArticle.xml"),
-    ("KISA", "https://knvd.krcert.or.kr/rss/securityNotice.do"),  # 실패하면 이 줄을 지워도 됩니다
+    ("KISA", "https://kisa.or.kr/rss/402"),  # KISA 보도자료 (공식 RSS 목록: https://www.kisa.or.kr/702)
 ]
 CISCO_PSIRT = "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
@@ -70,13 +72,13 @@ TARGET_SITES = [
      "require_param": "seq=", "need_event": True},
     {"name": "부산경제진흥원_소상공인디지털", "label": "BEPA",
      "url": "https://www.bepa.kr/kor/view.do?no=1502", "domain": "https://www.bepa.kr",
-     "require_param": "idx=", "need_event": True},
+     "require_param": "idx=", "need_event": True, "lenient_ssl": True},
     {"name": "부산경제진흥원_기업지원사업", "label": "BEPA",
      "url": "https://www.bepa.kr/kor/view.do?no=1505", "domain": "https://www.bepa.kr",
-     "require_param": "idx=", "need_event": True},
+     "require_param": "idx=", "need_event": True, "lenient_ssl": True},
     {"name": "부산과학기술고등교육진흥원_사업", "label": "BISTEP",
      "url": "https://www.bistep.re.kr/board.es?mid=a10301010000&bid=0002", "domain": "https://www.bistep.re.kr",
-     "require_param": "nttSn=", "need_event": True},
+     "require_param": "nttSn=", "need_event": True, "lenient_ssl": True},
     {"name": "부산상공회의소_교육행사", "label": "부산상의",
      "url": "https://www.bcci.or.kr/", "domain": "https://www.bcci.or.kr",
      "require_param": "seq=", "need_event": True},
@@ -124,10 +126,32 @@ _NVD_TOTAL = None   # 최근 2일 Critical CVE 전체 건수
 
 
 # ----------------------------- 유틸 -----------------------------
-def http_get(url, timeout=25):
+def http_get(url, timeout=25, lenient_ssl=False):
     req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except urllib.error.URLError as e:
+        # 상대 사이트가 인증서 중간 단계를 빠뜨린 경우에만 (lenient_ssl=True 인 사이트), 검증 없이 한 번 더 시도
+        if lenient_ssl and isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+            ctx = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                return r.read()
+        raise
+
+
+def http_get_retry(url, timeout=60, tries=3, wait=8):
+    """느린 서버용: 시간 초과/일시 오류면 잠시 쉬었다가 다시 시도"""
+    last = None
+    for i in range(tries):
+        try:
+            return http_get(url, timeout)
+        except Exception as e:
+            last = e
+            print("[재시도]", i + 1, "/", tries, str(e)[:80])
+            if i < tries - 1:
+                time.sleep(wait * (i + 1))
+    raise last
 
 
 def decode_html(raw):
@@ -360,7 +384,7 @@ def fetch_nvd():
         "pubEndDate": now.strftime("%Y-%m-%dT%H:%M:%S.000"),
         "resultsPerPage": 50,
     })
-    data = json.loads(http_get("https://services.nvd.nist.gov/rest/json/cves/2.0?" + q, 40).decode("utf-8"))
+    data = json.loads(http_get_retry("https://services.nvd.nist.gov/rest/json/cves/2.0?" + q, 60, 3, 8).decode("utf-8"))
     out = []
     for v in data.get("vulnerabilities", []):
         c = v.get("cve", {})
@@ -450,7 +474,7 @@ def load_registered_events():
 
 def scrape_site(site):
     """게시판 목록 HTML 에서 게시글 링크를 찾아 보안 관련 항목만 추출 (사이트별 구조를 몰라도 동작하는 범용 방식)"""
-    page = decode_html(http_get(site["url"], 30))
+    page = decode_html(http_get(site["url"], 30, site.get("lenient_ssl", False)))
     today = dt.datetime.now(KST).date()
     out, seen = [], set()
     for m in re.finditer(r"<a\b([^>]*)>(.*?)</a>", page, re.S | re.I):
