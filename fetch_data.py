@@ -863,7 +863,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 196px 220px 1fr 52px 28px;row-gap:10px}
+ padding:14px;display:grid;grid-template-rows:116px 66px 160px 340px 290px 196px 220px 1fr 52px 28px;row-gap:10px}
 .panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:16px 22px;overflow:hidden;position:relative}
 .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1;min-width:0}
@@ -917,7 +917,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .day .tt i{font-style:normal;color:#7C93B2;font-weight:500}
 .day .pp{font-size:15px;color:#60A5FA;line-height:18px}
 /* 뉴스 행 */
-.row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .row:last-child{border-bottom:0}
 .src{font-size:17px;font-weight:700;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE}
 .t{font-size:25px;font-weight:700;line-height:1.28;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
