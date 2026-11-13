@@ -194,6 +194,9 @@ def strip_source(title):
     return title
 
 
+CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}")
+
+
 def parse_rss(url, source):
     root = ET.fromstring(http_get(url))
     out = []
@@ -202,7 +205,9 @@ def parse_rss(url, source):
         if not title:
             continue
         pub = it.findtext("pubDate") or it.findtext("{http://purl.org/dc/elements/1.1/}date")
+        raw = (it.findtext("description") or "") + " " + title
         out.append({
+            "cves": list(dict.fromkeys(CVE_RE.findall(raw))),
             "src": source,
             "title": title,
             "link": (it.findtext("link") or "").strip(),
@@ -291,10 +296,20 @@ def categorize(text):
 def guess_product(desc):
     """NVD 영문 설명에서 제품명 부분만 대략 추출"""
     try:
+        # "A vulnerability was determined in Linksys EA8100 1.0.3 ..." 형태: 제품명(+모델)만 추출
+        m = re.search(r"(?:determined|found|discovered|identified|classified|detected)\s+in\s+(?:the\s+)?"
+                      r"([A-Za-z0-9][A-Za-z0-9 ._\-/]{2,50}?)(?=\s+v?\d+(?:\.\d+)+|\s*[,.;(]|\s+(?:up to|through|before|prior|and|of|that|this)\b)", desc)
+        if m:
+            return m.group(1).strip()
+        # "NextScan 1.1.0 through 1.2.0 contains ..." / "XWEB EVO before 5.6.2 ..." 형태
+        m = re.match(r"([A-Za-z0-9][A-Za-z0-9 ._\-/]{2,40}?)\s+(?:versions?\s+)?(?:v?\d+(?:\.\d+)+\s+)?(?:through|before|prior to|up to|and earlier)\b", desc)
+        if m:
+            return m.group(1).strip()
         m = re.search(r"(?:vulnerability|flaw|issue|weakness) in (?:the )?(.{4,60}?)"
                       r"(?: (?:of|could|allows|that|which|before|prior|through|version)\b|[,.;(])", desc, re.I)
         if m:
-            return m.group(1).strip()
+            r = m.group(1).strip()
+            return (r.rsplit(" in ", 1)[-1].strip() if " in " in r else r)
         m = re.match(r"(.{4,40}?)(?: (?:before|prior to|through|version|allows|is|in|up to)\b|[,(])", desc)
         return (m.group(1) if m else desc[:40]).strip()
     except Exception:
@@ -323,6 +338,23 @@ def kev_item(v):
     }
 
 
+def csaf_info(link):
+    """Cisco 권고 1건의 공식 CSAF 데이터에서 CVE 번호와 심각도를 가져옴 (실패하면 빈 값)"""
+    m = re.search(r"/CiscoSecurityAdvisory/([^/?#]+)", link or "")
+    if not m:
+        return [], ""
+    aid = m.group(1)
+    url = "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/%s/csaf/%s.json" % (aid, aid)
+    d = json.loads(http_get(url, 20).decode("utf-8"))
+    cves = []
+    for v in d.get("vulnerabilities") or []:
+        c = (v.get("cve") or "").strip()
+        if c and c not in cves:
+            cves.append(c)
+    sev = (((d.get("document") or {}).get("aggregate_severity")) or {}).get("text", "")
+    return cves, sev
+
+
 def psirt_item(x):
     desc = x.get("desc", "")
     atk, eff, lvl = classify(x["title"], desc)
@@ -331,9 +363,11 @@ def psirt_item(x):
         cat = "Cisco 장비·SW"
     m = re.search(r"(?:Impact Rating|Severity)\W{0,6}(Critical|High|Medium|Low)", desc, re.I)
     sev = SEV_KO.get(m.group(1).capitalize(), "") if m else ""
+    if not sev:
+        sev = SEV_KO.get((x.get("csaf_sev") or "").capitalize(), "")
     title = re.sub(r"\s+Vulnerabilit(?:y|ies)$", "", x["title"])
     return {"title": title, "link": x.get("link", ""), "ts": x["ts"],
-            "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev}
+            "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev, "cves": x.get("cves", [])}
 
 
 # ----------------------------- 수집: 뉴스 / 취약점 -----------------------------
@@ -406,7 +440,15 @@ def fetch_nvd():
 def fetch_psirt():
     items = parse_rss(CISCO_PSIRT, "Cisco")
     items.sort(key=lambda x: x["ts"], reverse=True)
-    return [psirt_item(x) for x in items[:6]]
+    items = items[:6]
+    for x in items:
+        try:
+            cves, sev = csaf_info(x.get("link", ""))
+            x["cves"] = list(dict.fromkeys(x.get("cves", []) + cves))
+            x["csaf_sev"] = sev
+        except Exception as e:
+            print("[경고] Cisco CSAF 실패", x.get("link", "")[-40:], str(e)[:60])
+    return [psirt_item(x) for x in items]
 
 
 # ----------------------------- 수집: 국내 보안행사 -----------------------------
@@ -863,15 +905,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:116px 66px 160px 340px 290px 196px 220px 1fr 52px 28px;row-gap:10px}
+ padding:14px;display:grid;grid-template-rows:106px 62px 160px 324px 274px 198px 198px 170px 1fr 44px 26px;row-gap:8px}
 .panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:16px 22px;overflow:hidden;position:relative}
 .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1;min-width:0}
-.ttl small{font-size:18px;font-weight:500;color:#7C93B2;margin-left:10px}
+.ttl small{font-size:18px;font-weight:500;color:#93A9C6;margin-left:10px}
 .pg{display:flex;align-items:center;flex:none;margin-left:10px}
 .pb{width:44px;height:38px;border:0;border-radius:10px;background:rgba(34,211,238,.15);color:#22D3EE;font-size:28px;font-weight:900;line-height:36px;cursor:pointer;margin-left:6px}
 .pb:hover,.pb:focus{outline:2px solid #22D3EE;outline-offset:1px}
-.pd{display:inline-block;margin:0 6px;min-width:44px;text-align:center;font-size:20px;font-weight:700;color:#7C93B2}
+.pd{display:inline-block;margin:0 6px;min-width:44px;text-align:center;font-size:20px;font-weight:700;color:#93A9C6}
 .fade{transition:opacity .25s ease;min-height:0}
 .fade.out{opacity:0}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
@@ -880,7 +922,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .brand{display:flex;align-items:center}
 .brand svg{margin-right:16px}
 .brand b{font-size:40px;font-weight:900;letter-spacing:-1px;display:block;line-height:1.1}
-.brand span{font-size:20px;color:#7C93B2}
+.brand span{font-size:20px;color:#93A9C6}
 .clock{text-align:right}
 #clock{font-size:60px;font-weight:900;color:#22D3EE;line-height:60px;letter-spacing:-2px}
 #date{font-size:22px;font-weight:700;line-height:28px}
@@ -912,16 +954,16 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .day.today{border:2px solid #22D3EE;background:rgba(34,211,238,.1)}
 .day.rain{background:rgba(59,130,246,.22)}
 .day .dn{font-size:20px;font-weight:700;line-height:24px}
-.day .dd{font-size:14px;color:#7C93B2;line-height:16px}
+.day .dd{font-size:14px;color:#93A9C6;line-height:16px}
 .day .tt{font-size:20px;font-weight:700;line-height:24px}
-.day .tt i{font-style:normal;color:#7C93B2;font-weight:500}
+.day .tt i{font-style:normal;color:#93A9C6;font-weight:500}
 .day .pp{font-size:15px;color:#60A5FA;line-height:18px}
 /* 뉴스 행 */
-.row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .row:last-child{border-bottom:0}
 .src{font-size:17px;font-weight:700;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE}
 .t{font-size:25px;font-weight:700;line-height:1.28;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.ago{font-size:17px;color:#7C93B2;text-align:right}
+.ago{font-size:17px;color:#93A9C6;text-align:right}
 /* 긴급 취약점 */
 .kev{display:grid;grid-template-columns:215px 1fr 120px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .kev:last-child{border-bottom:0}
@@ -936,8 +978,17 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .l1{background:#EF4444;color:#fff}.l2{background:#F97316;color:#111}.l3{background:#FACC15;color:#111}
 .sol{color:#22D3EE;font-weight:700}
 /* 두 칸 */
-.two{display:grid;grid-template-columns:1fr 1fr;column-gap:10px}
-.two .panel{padding:14px 18px}
+.vr{display:grid;grid-template-columns:215px 1fr 120px;column-gap:12px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.vr:last-child{border-bottom:0}
+.vr .a{font-size:24px;font-weight:700;line-height:28px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vr .b{font-size:19px;line-height:24px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vr .cve{line-height:28px}
+.vr .cv2{font-family:Consolas,monospace;font-size:21px;font-weight:700;color:#22D3EE;line-height:25px;white-space:nowrap}
+.vr .cn{font-size:16px;line-height:22px;color:#93A9C6;white-space:nowrap}
+.vr .sc{text-align:right;font-size:30px;font-weight:900;line-height:30px;font-variant-numeric:tabular-nums}
+.vr .sc small{display:block;font-size:14px;line-height:16px;font-weight:500;color:#93A9C6}
+.vr .sc.s9{color:#F87171}.vr .sc.s7{color:#FB923C}
+.vr .ag{text-align:right;font-size:18px;color:#93A9C6;font-weight:700}
 .mini{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:20px;line-height:26px}
 .mini:last-child{border-bottom:0}
 .mini b{display:inline-block;min-width:54px;text-align:center;border-radius:6px;margin-right:8px;padding:0 6px;font-size:19px}
@@ -947,27 +998,27 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .m1 .pr{font-size:18px;color:#9FB4CE;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .m1 .ef{font-size:20px;font-weight:700;color:#E5EEF9;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .m2{font-size:19px;line-height:26px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.m2 i{font-style:normal;color:#7C93B2}
+.m2 i{font-style:normal;color:#93A9C6}
 .sc9{background:#EF4444;color:#fff}.sc7{background:#F97316;color:#111}
-.empty{color:#7C93B2;font-size:20px;padding:10px 0}
+.empty{color:#93A9C6;font-size:20px;padding:10px 0}
 /* 차트 */
 #chart{display:grid;grid-template-columns:1fr;padding:12px 22px}
-.dn2{display:flex;align-items:center;height:140px}
-.dnw{position:relative;width:132px;height:132px;margin-right:26px;flex:none}
-.dnc{position:absolute;left:0;top:0;width:132px;height:132px;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.dnc b{font-size:34px;font-weight:900;line-height:1}
-.dnc span{font-size:15px;color:#7C93B2}
+.dn2{display:flex;align-items:center;height:104px}
+.dnw{position:relative;width:104px;height:104px;margin-right:26px;flex:none}
+.dnc{position:absolute;left:0;top:0;width:104px;height:104px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.dnc b{font-size:30px;font-weight:900;line-height:1}
+.dnc span{font-size:13px;color:#93A9C6}
 .lgs{display:grid;grid-template-columns:1fr 1fr;column-gap:26px;row-gap:6px;flex:1}
 .lg{font-size:19px;line-height:24px;white-space:nowrap;display:flex;align-items:center}
 .lg i{width:14px;height:14px;border-radius:4px;margin-right:9px;flex:none}
 .lg b{margin-left:auto;color:#22D3EE;font-size:20px}
 /* 국내 보안행사 */
-.ev{display:grid;grid-template-columns:1fr 110px;column-gap:14px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.ev{display:grid;grid-template-columns:1fr 110px;column-gap:14px;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .ev:last-child{border-bottom:0}
-.evl{display:flex;align-items:center;margin-bottom:2px}
+.evl{display:flex;align-items:center;margin-bottom:0}
 .dt{font-size:20px;font-weight:900;color:#22D3EE;white-space:nowrap;margin-right:10px}
-.tt2{font-size:23px;font-weight:700;line-height:30px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pl{font-size:17px;line-height:22px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tt2{font-size:23px;font-weight:700;line-height:28px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pl{font-size:17px;line-height:20px;color:#93A9C6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .evm{min-width:0}
 .bd{font-size:18px;font-weight:900;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE;white-space:nowrap}
 .bd.hot{background:#EF4444;color:#fff}
@@ -991,7 +1042,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 a.lk{color:inherit;text-decoration:none;cursor:pointer}
 a.mini{display:block}
 a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius:8px;background:rgba(34,211,238,.08)}
-#foot{display:flex;justify-content:space-between;align-items:center;font-size:18px;color:#7C93B2;padding:0 10px}
+#foot{display:flex;justify-content:space-between;align-items:center;font-size:18px;color:#93A9C6;padding:0 10px}
 #foot .bad{color:#FACC15;font-weight:900}
 .pulse{display:inline-block;width:10px;height:10px;border-radius:50%;background:#34D399;margin-right:8px;animation:blink 2s infinite}
 </style>
@@ -1047,11 +1098,16 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
     <div id="kev" class="fade"></div>
   </div>
 
-  <div class="two">
-    <div class="panel"><div class="hd" style="height:29px"><div class="ttl">신규 Critical CVE<small>NVD</small></div>
-      <div class="pg"><button class="pb" onclick="nav('nvd',-1)">&lsaquo;</button><span class="pd" id="d-nvd"></span><button class="pb" onclick="nav('nvd',1)">&rsaquo;</button></div></div><div id="nvd" class="fade"></div></div>
-    <div class="panel"><div class="hd" style="height:29px"><div class="ttl">Cisco 보안 권고<small>PSIRT</small></div>
-      <div class="pg"><button class="pb" onclick="nav('psirt',-1)">&lsaquo;</button><span class="pd" id="d-psirt"></span><button class="pb" onclick="nav('psirt',1)">&rsaquo;</button></div></div><div id="psirt" class="fade"></div></div>
+  <div class="panel">
+    <div class="hd"><div class="ttl">신규 Critical CVE<small>NVD · 최근 2일 · CVSS 9.0 이상</small></div>
+      <div class="pg"><button class="pb" onclick="nav('nvd',-1)">&lsaquo;</button><span class="pd" id="d-nvd"></span><button class="pb" onclick="nav('nvd',1)">&rsaquo;</button></div></div>
+    <div id="nvd" class="fade"></div>
+  </div>
+
+  <div class="panel">
+    <div class="hd"><div class="ttl">Cisco 보안 권고<small>PSIRT · 최신 권고</small></div>
+      <div class="pg"><button class="pb" onclick="nav('psirt',-1)">&lsaquo;</button><span class="pd" id="d-psirt"></span><button class="pb" onclick="nav('psirt',1)">&rsaquo;</button></div></div>
+    <div id="psirt" class="fade"></div>
   </div>
 
   <div id="chart" class="panel">
@@ -1149,8 +1205,12 @@ var RENDER={
  news:function(n){return A('row',n.link,'<span class="src">'+esc(n.src)+'</span><div class="t">'+esc(n.title)+'</div><span class="ago">'+ago(n.ts)+'</span>')},
  kev:function(v){return A('kev',NVD+v.cve,'<div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div>')},
  events:evHtml,
- nvd:function(v){return A('mini',NVD+v.cve,'<div class=\"m1\"><b class=\"'+(v.score>=9?'sc9':'sc7')+'\">'+v.score+'</b><span class=\"atk l'+(v.lvl||3)+'\">'+esc(v.atk)+'</span><span class=\"cv\">'+esc(v.cve)+'</span><span class=\"pr\">'+esc(v.prod)+'</span></div><div class=\"m2\">'+esc(v.cat)+' <i>·</i> '+esc(v.eff)+'</div>')},
- psirt:function(p){return A('mini',p.link,'<div class=\"m1\"><span class=\"atk l'+(p.lvl||3)+'\">'+esc(p.atk)+'</span>'+(p.sev?'<span class=\"atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'\">'+esc(p.sev)+'</span>':'')+'<span class=\"ef\">'+esc(p.eff)+'</span></div><div class=\"m2\">'+esc(p.title)+' <i>· '+ago(p.ts)+'</i></div>')}
+ nvd:function(v){return A('vr',NVD+v.cve,'<div class=\"cve\">'+esc(v.cve)+'</div><div><div class=\"a\"><span class=\"atk l'+(v.lvl||3)+'\">'+esc(v.atk)+'</span>'+esc(v.prod)+'</div><div class=\"b\">'+esc(v.cat)+' · '+esc(v.eff)+'</div></div><div class=\"sc '+(v.score>=9?'s9':'s7')+'\">'+Number(v.score).toFixed(1)+'<small>CVSS</small></div>')},
+ psirt:function(p){var c=p.cves||[],cl;
+  if(!c.length){cl='<div class=\"cn\">CVE 번호 없음</div>'}
+  else if(c.length<=2){cl=c.map(function(x){return '<div class=\"cv2\">'+esc(x)+'</div>'}).join('')}
+  else{cl='<div class=\"cv2\">'+esc(c[0])+'</div><div class=\"cn\">외 '+(c.length-1)+'건 더</div>'}
+  return A('vr',p.link,'<div>'+cl+'</div><div><div class=\"a\"><span class=\"atk l'+(p.lvl||3)+'\">'+esc(p.atk)+'</span>'+(p.sev?'<span class=\"atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'\">'+esc(p.sev)+'</span>':'')+esc(p.eff)+'</div><div class=\"b\">'+esc(p.title)+'</div></div><div class=\"ag\">'+ago(p.ts)+'</div>')}
 };
 function pages(name){return Math.max(1,Math.min(MAXP[name],Math.ceil(LIST[name].length/PER[name])))}
 function paint(name){
@@ -1207,7 +1267,7 @@ function renderDonut(st){
   segs+='<circle cx="52" cy="52" r="40" fill="none" stroke="'+col+'" stroke-width="14" transform="rotate(-90 52 52)" style="stroke-dasharray:0 '+C+';transition:stroke-dasharray 1s ease" stroke-dashoffset="'+(-cum)+'" data-d="'+len+' '+(C-len)+'"/>';
   cum+=len;
   lg+='<div class="lg"><i style="background:'+col+'"></i>'+esc(ty[i].name)+'<b>'+ty[i].n+'건</b></div>'}
- $('donut').innerHTML='<div class="dn2"><div class="dnw"><svg width="132" height="132" viewBox="0 0 104 104"><circle cx="52" cy="52" r="40" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14"/>'+segs+'</svg><div class="dnc"><b>'+t+'</b><span>30일 합계</span></div></div><div class="lgs">'+lg+'</div></div>';
+ $('donut').innerHTML='<div class="dn2"><div class="dnw"><svg width="104" height="104" viewBox="0 0 104 104"><circle cx="52" cy="52" r="40" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14"/>'+segs+'</svg><div class="dnc"><b>'+t+'</b><span>30일 합계</span></div></div><div class="lgs">'+lg+'</div></div>';
  setTimeout(function(){
   var cs=$('donut').getElementsByTagName('circle'),k;
   for(k=0;k<cs.length;k++){var dd=cs[k].getAttribute('data-d');if(dd)cs[k].style.strokeDasharray=dd}
