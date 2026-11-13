@@ -632,7 +632,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
 
   <!-- 7. Cisco 보안 권고 (PSIRT) - 가로 행 컴팩트 디자인 적용 -->
   <div class="panel">
-    <div class="hd"><div class="ttl">Cisco 보안 권고 <small>PSIRT · 네트워크 &middot; 인프라</small></div>
+    <div class="hd"><div class="ttl">Cisco 보안 권고</div>
       <div class="pg"><button class="pb" onclick="nav('psirt',-1)">&lsaquo;</button><span class="pd" id="d-psirt"></span><button class="pb" onclick="nav('psirt',1)">&rsaquo;</button></div></div>
     <div id="psirt" class="fade"></div>
   </div>
