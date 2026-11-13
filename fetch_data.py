@@ -209,7 +209,7 @@ DEFAULT_ATK = ("기타 취약점", "상세 내용은 원문 확인", 3)
 # 대상 분류: (영어 단어들, 분류 이름)
 DEFAULT_CAT = "기타 SW·장비"
 CATS = [
-    (("vpn", "firewall", "adaptive security appliance", "asa", "ftd", "firepower", "fortios", "fortigate",
+    (("vpn", "firewall", "adaptive security appliance", "asa", "ftd", "firepower", "fortios", "axgate",
       "pan-os", "sonicwall", "globalprotect", "netscaler", "big-ip", "secure client"), "방화벽·VPN"),
     (("exchange", "mail", "webmail", "zimbra", "roundcube", "postfix", "esa"), "메일 서버"),
     (("chrome", "chromium", "firefox", "edge", "safari", "browser", "webkit"), "웹 브라우저"),
@@ -220,7 +220,7 @@ CATS = [
     (("router", "switch", "meraki", "access point", "wlc", "camera", "nas", "synology", "qnap", "d-link",
       "dlink", "tp-link", "zyxel"), "네트워크·IoT 장비"),
     (("vmware", "esxi", "vcenter", "hyper-v", "citrix", "kubernetes", "docker", "gitlab", "jenkins", "ibm",
-      "sap", "gpustack", "aspera"), "서버·플랫폼"),
+      "sap", "gpustack", "aispera"), "서버·플랫폼"),
 ]
 # 분류별 우리 취급 솔루션 제안 (영업 포인트)
 SOL = {
