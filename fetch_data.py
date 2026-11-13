@@ -92,7 +92,7 @@ BEXCO_URL = "https://www.bexco.co.kr/kor/CMS/EventScheduleMgr/list.do?mCode=MN21
 # 보안 관련 키워드 (제목에 하나라도 있어야 표시, 영문은 소문자로 비교). 필요하면 AI, 클라우드 등을 추가하세요.
 SEC_KW = ["보안", "정보보호", "사이버", "해킹", "개인정보", "랜섬", "침해", "암호", "제로트러스트", "zero trust",
           "시큐리티", "security", "isms", "ciso", "망분리", "취약점", "포렌식", "위협", "방화벽"]
-EXCLUDE_WORDS = ["입찰", "채용", "낙찰", "계약", "합격", "선정 결과", "결과 안내", "결과 공고", "용역","부고"]
+EXCLUDE_WORDS = ["입찰", "채용", "낙찰", "계약", "합격", "선정 결과", "결과 안내", "결과 공고", "용역"]
 EVENT_WORDS = ["세미나", "교육", "컨퍼런스", "콘퍼런스", "워크숍", "웨비나", "설명회", "포럼", "아카데미",
                "해커톤", "강좌", "강연", "실습", "행사", "대회", "박람회", "전시"]
 ACTION_WORDS = ["모집", "접수", "개최", "신청", "참가", "초청", "등록", "안내", "예정", "오픈"]
@@ -342,17 +342,25 @@ def csaf_info(link):
     """Cisco 권고 1건의 공식 CSAF 데이터에서 CVE 번호와 심각도를 가져옴 (실패하면 빈 값)"""
     m = re.search(r"/CiscoSecurityAdvisory/([^/?#]+)", link or "")
     if not m:
-        return [], ""
+        return [], "", None
     aid = m.group(1)
     url = "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/%s/csaf/%s.json" % (aid, aid)
     d = json.loads(http_get(url, 20).decode("utf-8"))
-    cves = []
+    cves, v3, other = [], [], []
     for v in d.get("vulnerabilities") or []:
         c = (v.get("cve") or "").strip()
         if c and c not in cves:
             cves.append(c)
+        for sc in v.get("scores") or []:
+            for k, val in sc.items():
+                if isinstance(val, dict) and val.get("baseScore") is not None:
+                    try:
+                        (v3 if "v3" in k or "v4" in k else other).append(float(val["baseScore"]))
+                    except (TypeError, ValueError):
+                        pass
     sev = (((d.get("document") or {}).get("aggregate_severity")) or {}).get("text", "")
-    return cves, sev
+    score = max(v3 or other or [0])
+    return cves, sev, (score if score > 0 else None)
 
 
 def psirt_item(x):
@@ -367,15 +375,23 @@ def psirt_item(x):
         sev = SEV_KO.get((x.get("csaf_sev") or "").capitalize(), "")
     title = re.sub(r"\s+Vulnerabilit(?:y|ies)$", "", x["title"])
     return {"title": title, "link": x.get("link", ""), "ts": x["ts"],
-            "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev, "cves": x.get("cves", [])}
+            "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev, "cves": x.get("cves", []), "score": x.get("csaf_score")}
 
 
 # ----------------------------- 수집: 뉴스 / 취약점 -----------------------------
+OBIT_RE = re.compile(r"부고|부음|부친상|모친상|빙부상|빙모상|장인상|장모상|시부상|시모상|조부상|조모상|별세|빈소|발인|영결식|\[\s*訃告\s*\]|訃告")
+
+
+def is_obit(title):
+    """경조사(부고) 기사 여부"""
+    return bool(OBIT_RE.search(title or ""))
+
+
 def fetch_news():
     items, ok = [], 0
     for name, url in NEWS_FEEDS:
         try:
-            items += parse_rss(url, name)
+            items += [x for x in parse_rss(url, name) if not is_obit(x["title"])]
             ok += 1
         except Exception as e:
             print("[실패] 뉴스", name, e)
@@ -443,9 +459,10 @@ def fetch_psirt():
     items = items[:6]
     for x in items:
         try:
-            cves, sev = csaf_info(x.get("link", ""))
+            cves, sev, score = csaf_info(x.get("link", ""))
             x["cves"] = list(dict.fromkeys(x.get("cves", []) + cves))
             x["csaf_sev"] = sev
+            x["csaf_score"] = score
         except Exception as e:
             print("[경고] Cisco CSAF 실패", x.get("link", "")[-40:], str(e)[:60])
     return [psirt_item(x) for x in items]
@@ -978,7 +995,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .l1{background:#EF4444;color:#fff}.l2{background:#F97316;color:#111}.l3{background:#FACC15;color:#111}
 .sol{color:#22D3EE;font-weight:700}
 /* 두 칸 */
-.vr{display:grid;grid-template-columns:215px 1fr 120px;column-gap:12px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.vr{display:grid;grid-template-columns:215px minmax(0,1fr) 120px;column-gap:12px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .vr:last-child{border-bottom:0}
 .vr .a{font-size:24px;font-weight:700;line-height:28px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vr .b{font-size:19px;line-height:24px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -987,7 +1004,8 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .vr .cn{font-size:16px;line-height:22px;color:#93A9C6;white-space:nowrap}
 .vr .sc{text-align:right;font-size:30px;font-weight:900;line-height:30px;font-variant-numeric:tabular-nums}
 .vr .sc small{display:block;font-size:14px;line-height:16px;font-weight:500;color:#93A9C6}
-.vr .sc.s9{color:#F87171}.vr .sc.s7{color:#FB923C}
+.vr .sc.s9{color:#F87171}.vr .sc.s7{color:#FB923C}.vr .sc.s4{color:#FACC15}
+.vr.p{grid-template-columns:215px minmax(0,1fr) 150px}
 .vr .ag{text-align:right;font-size:18px;color:#93A9C6;font-weight:700}
 .mini{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:20px;line-height:26px}
 .mini:last-child{border-bottom:0}
@@ -1210,7 +1228,7 @@ var RENDER={
   if(!c.length){cl='<div class=\"cn\">CVE 번호 없음</div>'}
   else if(c.length<=2){cl=c.map(function(x){return '<div class=\"cv2\">'+esc(x)+'</div>'}).join('')}
   else{cl='<div class=\"cv2\">'+esc(c[0])+'</div><div class=\"cn\">외 '+(c.length-1)+'건 더</div>'}
-  return A('vr',p.link,'<div>'+cl+'</div><div><div class=\"a\"><span class=\"atk l'+(p.lvl||3)+'\">'+esc(p.atk)+'</span>'+(p.sev?'<span class=\"atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'\">'+esc(p.sev)+'</span>':'')+esc(p.eff)+'</div><div class=\"b\">'+esc(p.title)+'</div></div><div class=\"ag\">'+ago(p.ts)+'</div>')}
+  return A('vr p',p.link,'<div>'+cl+'</div><div><div class=\"a\"><span class=\"atk l'+(p.lvl||3)+'\">'+esc(p.atk)+'</span>'+(p.sev?'<span class=\"atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'\">'+esc(p.sev)+'</span>':'')+esc(p.eff)+'</div><div class=\"b\">'+esc(p.title)+'</div></div>'+(p.score?'<div class=\"sc '+(p.score>=9?'s9':(p.score>=7?'s7':'s4'))+'\">'+Number(p.score).toFixed(1)+'<small>CVSS · '+ago(p.ts)+'</small></div>':'<div class=\"ag\">'+ago(p.ts)+'</div>'))}
 };
 function pages(name){return Math.max(1,Math.min(MAXP[name],Math.ceil(LIST[name].length/PER[name])))}
 function paint(name){
