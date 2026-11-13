@@ -22,6 +22,7 @@
 import email.utils
 import html
 import json
+import math
 import os
 import re
 import time
@@ -40,10 +41,16 @@ NEWS_FEEDS = [
 CISCO_PSIRT = "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 BUSAN = (35.1796, 129.0756)
+# 기상청 단기예보 인증키 (공공데이터포털). 코드에 직접 적지 말고 환경변수 KMA_API_KEY 로 전달하세요.
+#   GitHub: 저장소 Settings > Secrets and variables > Actions 에 KMA_API_KEY 로 등록
+# 키가 없거나 호출이 실패하면 자동으로 Open-Meteo 날씨를 사용합니다.
+KMA_KEY = os.environ.get("KMA_API_KEY", "").strip()
+KMA_BASE = "https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0"
+KST = dt.timezone(dt.timedelta(hours=9))
 EVENTS_FILE = Path("events.json")
 
 # 위협 수준 (자체 산정 기준이며 국가 공식 경보 단계와 무관합니다)
-# 점수 = 신규 악용(2일, 최대 8) + 취급 제품 해당(7일, 건당 3점, 최대 6) + Critical CVE 5건 이상(2점) + Cisco 치명·높음 권고(3점)
+#   점수 = 신규 악용(2일, 최대 8) + 취급 제품 해당(7일, 건당 3점, 최대 6) + Critical CVE 5건 이상(2점) + Cisco 치명·높음 권고(3점)
 THREAT_MID = 5     # 이 점수 이상이면 "주의"
 THREAT_HIGH = 10   # 이 점수 이상이면 "경계"
 
@@ -590,7 +597,7 @@ def fetch_events():
 
 
 # ----------------------------- 수집: 날씨 -----------------------------
-def fetch_weather():
+def _fetch_weather_openmeteo():
     q = urllib.parse.urlencode({
         "latitude": BUSAN[0], "longitude": BUSAN[1],
         "current": "temperature_2m,weather_code",
@@ -607,6 +614,126 @@ def fetch_weather():
             "pop": dd["precipitation_probability_max"][i],
         })
     return {"temp": round(d["current"]["temperature_2m"]), "code": d["current"]["weather_code"], "days": days}
+
+
+def kma_grid(lat, lon):
+    """위경도 -> 기상청 격자(nx, ny) (람베르트 정형도법, 기상청 공식 변환식)"""
+    RE, GRID, SLAT1, SLAT2, OLON, OLAT, XO, YO = 6371.00877, 5.0, 30.0, 60.0, 126.0, 38.0, 43, 136
+    D = math.pi / 180.0
+    re = RE / GRID
+    slat1, slat2, olon, olat = SLAT1 * D, SLAT2 * D, OLON * D, OLAT * D
+    sn = math.tan(math.pi * 0.25 + slat2 * 0.5) / math.tan(math.pi * 0.25 + slat1 * 0.5)
+    sn = math.log(math.cos(slat1) / math.cos(slat2)) / math.log(sn)
+    sf = math.tan(math.pi * 0.25 + slat1 * 0.5)
+    sf = math.pow(sf, sn) * math.cos(slat1) / sn
+    ro = math.tan(math.pi * 0.25 + olat * 0.5)
+    ro = re * sf / math.pow(ro, sn)
+    ra = math.tan(math.pi * 0.25 + lat * D * 0.5)
+    ra = re * sf / math.pow(ra, sn)
+    theta = lon * D - olon
+    if theta > math.pi:
+        theta -= 2.0 * math.pi
+    if theta < -math.pi:
+        theta += 2.0 * math.pi
+    theta *= sn
+    return int(ra * math.sin(theta) + XO + 0.5), int(ro - ra * math.cos(theta) + YO + 0.5)
+
+
+def kma_call(op, base_date, base_time, nx, ny, rows=1000):
+    """기상청 단기예보 API 호출 -> item 목록 (여러 페이지면 모두 합침)"""
+    key = urllib.parse.unquote(KMA_KEY)
+    items, page = [], 1
+    while True:
+        q = urllib.parse.urlencode({
+            "serviceKey": key, "pageNo": page, "numOfRows": rows, "dataType": "JSON",
+            "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny})
+        d = json.loads(http_get(KMA_BASE + "/" + op + "?" + q).decode("utf-8"))
+        r = d["response"]
+        if r["header"]["resultCode"] != "00":
+            raise RuntimeError("기상청 응답 오류 " + str(r["header"]["resultCode"]) + " " + str(r["header"].get("resultMsg", "")))
+        body = r["body"]
+        it = (body.get("items") or {}).get("item") or []
+        items.extend(it if isinstance(it, list) else [it])
+        if page * rows >= int(body.get("totalCount") or 0):
+            return items
+        page += 1
+
+
+def kma_code(sky, pty):
+    """기상청 하늘상태/강수형태 -> 화면 아이콘 코드 (WMO 코드 체계에 맞춤)"""
+    if pty in (1, 2, 4, 5, 6):
+        return 61          # 비 (비/눈·소나기·빗방울 포함)
+    if pty in (3, 7):
+        return 71          # 눈 (눈날림 포함)
+    return {1: 0, 3: 2, 4: 3}.get(sky, 0)   # 맑음 / 구름많음 / 흐림
+
+
+def _fetch_weather_kma():
+    nx, ny = kma_grid(BUSAN[0], BUSAN[1])
+    now = dt.datetime.now(KST)
+    # 현재 기온/강수: 초단기실황 (매시 정각 자료, 약 40분 뒤 안정적으로 제공)
+    nb = now - dt.timedelta(minutes=40)
+    ncst = kma_call("getUltraSrtNcst", nb.strftime("%Y%m%d"), nb.strftime("%H00"), nx, ny)
+    obs = {i["category"]: i["obsrValue"] for i in ncst}
+    temp = round(float(obs["T1H"]))
+    pty_now = int(float(obs.get("PTY", 0)))
+    # 일별 최고/최저/강수확률: 단기예보 (당일 02시 발표분 = 오늘 최저·최고가 모두 포함, 02:15 이전엔 전날 23시 발표분)
+    if now.hour * 60 + now.minute >= 2 * 60 + 15:
+        fb, ft = now, "0200"
+    else:
+        fb, ft = now - dt.timedelta(days=1), "2300"
+    fc = kma_call("getVilageFcst", fb.strftime("%Y%m%d"), ft, nx, ny)
+    byday = {}
+    for i in fc:
+        byday.setdefault(i["fcstDate"], {}).setdefault(i["category"], []).append((i["fcstTime"], i["fcstValue"]))
+    days = []
+    for date in sorted(byday):
+        c = byday[date]
+        tmp = [float(v) for _, v in c.get("TMP", [])]
+        tmn = [float(v) for _, v in c.get("TMN", [])] or tmp
+        tmx = [float(v) for _, v in c.get("TMX", [])] or tmp
+        if not tmn or not tmx:
+            continue
+        pop = max([int(float(v)) for _, v in c.get("POP", [])] or [0])
+        day = lambda lst: [int(float(v)) for t, v in lst if "06" <= t[:2] <= "21"]   # 낮 시간대(06~21시)
+        ptys = [p for p in day(c.get("PTY", [])) if p > 0]
+        if ptys:
+            code = kma_code(1, max(set(ptys), key=ptys.count))
+        else:
+            sk = day(c.get("SKY", [])) or [1]
+            code = kma_code(max(set(sk), key=lambda x: (sk.count(x), x)), 0)
+        d = dt.date(int(date[:4]), int(date[4:6]), int(date[6:]))
+        days.append({"date": d.isoformat(), "code": code, "max": round(max(tmx)), "min": round(min(tmn)), "pop": pop})
+    if not days:
+        raise RuntimeError("기상청 단기예보 데이터 없음")
+    # 현재 아이콘: 실황 강수가 있으면 그 값, 없으면 현재 시각에 가장 가까운 예보의 하늘상태
+    today = now.strftime("%Y%m%d")
+    skies = [(abs(int(t[:2]) - now.hour), int(float(v))) for t, v in byday.get(today, {}).get("SKY", [])]
+    sky_now = min(skies)[1] if skies else 1
+    code_now = kma_code(sky_now, pty_now) if pty_now else kma_code(sky_now, 0)
+    return {"temp": temp, "code": code_now, "days": days}
+
+
+def fetch_weather():
+    """기상청 값을 우선 사용. 기상청이 주지 않는 먼 날짜(3일 이후)는 Open-Meteo 로 채워 7일을 유지."""
+    om = None
+    try:
+        om = _fetch_weather_openmeteo()
+    except Exception as e:
+        print("[경고] Open-Meteo 날씨 실패:", e)
+    if KMA_KEY:
+        try:
+            k = _fetch_weather_kma()
+            if not om:
+                return dict(k, src="KMA")
+            kd = {d["date"]: d for d in k["days"]}
+            days = [kd.get(d["date"], d) for d in om["days"]]
+            return {"temp": k["temp"], "code": k["code"], "days": days, "src": "KMA"}
+        except Exception as e:
+            print("[경고] 기상청 날씨 실패 -> Open-Meteo 로 대체:", e)
+    if om:
+        return dict(om, src="Open-Meteo")
+    raise RuntimeError("날씨 수집 실패")
 
 
 # ----------------------------- 통계 (위협 수준 / 30일 공격 유형) -----------------------------
@@ -752,7 +879,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 #wx{display:grid;grid-template-columns:270px 1fr;column-gap:18px;padding:12px 18px}
 .now{border-right:1px solid rgba(34,211,238,.18);padding-right:14px}
 .now .big{font-size:56px;font-weight:900;line-height:1}
-.now .cond{font-size:21px;font-weight:700;color:#A9C1DE;line-height:24px}
+.now .cond{font-size:22px;font-weight:700;color:#A9C1DE;line-height:28px}
 .week{display:grid;grid-template-columns:repeat(7,1fr);column-gap:8px}
 .day{text-align:center;border-radius:14px;padding:4px 2px;background:rgba(255,255,255,.04)}
 .day.today{border:2px solid #22D3EE;background:rgba(34,211,238,.1)}
@@ -875,7 +1002,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
     <div id="stats">
       <div class="st"><span class="lb">신규 악용(2일)</span><b id="c1">0</b><em>건</em></div>
       <div class="st"><span class="lb">Critical CVE(2일)</span><b id="c2">0</b><em>건</em></div>
-      <div class="st"><span class="lb">취급 제조사(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
+      <div class="st"><span class="lb">취급 제품(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
     </div>
   </div>
 
@@ -944,7 +1071,7 @@ function ago(ts){if(!ts)return '';var m=Math.floor((Date.now()/1000-ts)/60);if(m
 /* 날씨 아이콘 */
 function kind(c){if(c<=1)return 'sun';if(c==2)return 'part';if(c==3)return 'cloud';if(c==45||c==48)return 'fog';
  if((c>=71&&c<=77)||c==85||c==86)return 'snow';return 'rain'}
-function label(c){var k=kind(c);return {sun:'맑음',part:'구름조금',cloud:'흐림',fog:'안개',snow:'눈',rain:c>=95?'뇌우':'비'}[k]}
+function label(c){var k=kind(c);return {sun:'맑음',part:'구름많음',cloud:'흐림',fog:'안개',snow:'눈',rain:c>=95?'뇌우':'비'}[k]}
 var CL='<path d="M14 38a8 8 0 0 1 2-15 11 11 0 0 1 21 3 7 7 0 0 1-1 12z" fill="#CBD5E1"/>';
 function ico(c,s){var k=kind(c),b='';
  if(k=='sun')b='<circle cx="28" cy="28" r="10" fill="#FBBF24"/><g stroke="#FBBF24" stroke-width="3" stroke-linecap="round"><path d="M28 6v6M28 44v6M6 28h6M44 28h6M12 12l4 4M40 40l4 4M44 12l-4 4M16 40l-4 4"/></g>';
