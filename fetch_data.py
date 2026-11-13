@@ -602,7 +602,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
     <div id="stats">
       <div class="st"><span class="lb">신규 악용(2일)</span><b id="c1">0</b><em>건</em></div>
       <div class="st"><span class="lb">Critical CVE(2일)</span><b id="c2">0</b><em>건</em></div>
-      <div class="st"><span class="lb">취급 제품(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
+      <div class="st"><span class="lb">취급 제조사(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
     </div>
   </div>
 
