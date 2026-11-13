@@ -43,7 +43,7 @@ BUSAN = (35.1796, 129.0756)
 EVENTS_FILE = Path("events.json")
 
 # 위협 수준 (자체 산정 기준이며 국가 공식 경보 단계와 무관합니다)
-#   점수 = 신규 악용(2일, 최대 8) + 취급 제품 해당(7일, 건당 3점, 최대 6) + Critical CVE 5건 이상(2점) + Cisco 치명·높음 권고(3점)
+# 점수 = 신규 악용(2일, 최대 8) + 취급 제품 해당(7일, 건당 3점, 최대 6) + Critical CVE 5건 이상(2점) + Cisco 치명·높음 권고(3점)
 THREAT_MID = 5     # 이 점수 이상이면 "주의"
 THREAT_HIGH = 10   # 이 점수 이상이면 "경계"
 
@@ -709,7 +709,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 180px 220px 1fr 52px 28px;row-gap:10px}
+ padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 196px 220px 1fr 52px 28px;row-gap:10px}
 .panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:16px 22px;overflow:hidden;position:relative}
 .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1;min-width:0}
@@ -732,12 +732,16 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 #date{font-size:22px;font-weight:700;line-height:28px}
 /* 상태 바 */
 #status{display:flex;align-items:center;padding:6px 18px}
-.chip{display:flex;align-items:baseline;font-size:20px;font-weight:700;padding:4px 16px;border-radius:12px;background:rgba(255,255,255,.08);margin-right:22px;white-space:nowrap}
-.chip b{font-size:30px;font-weight:900;margin-left:8px}
-.chip small{font-size:13px;margin-left:8px;opacity:.7;font-weight:500}
-.chip.lv0{background:#34D399;color:#04281c}
-.chip.lv1{background:#FACC15;color:#111}
-.chip.lv2{background:#F97316;color:#111}
+.chip{display:flex;align-items:center;padding:3px 22px 3px 16px;border-radius:999px;margin-right:22px;white-space:nowrap;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.06)}
+.chip .cd{display:inline-block;width:14px;height:14px;border-radius:50%;margin-right:12px;animation:blink 1.6s infinite}
+.chip .cl{font-size:17px;font-weight:500;letter-spacing:1px;color:#A9C1DE;margin-right:12px}
+.chip b{font-size:30px;font-weight:900;line-height:1.1;letter-spacing:1px}
+.chip.lv0{background:linear-gradient(135deg,rgba(52,211,153,.30),rgba(52,211,153,.06));border-color:rgba(52,211,153,.65);box-shadow:0 0 18px rgba(52,211,153,.28),inset 0 0 12px rgba(52,211,153,.12)}
+.chip.lv0 .cd{background:#34D399;box-shadow:0 0 10px #34D399}.chip.lv0 b{color:#6EF0BC}
+.chip.lv1{background:linear-gradient(135deg,rgba(250,204,21,.30),rgba(250,204,21,.06));border-color:rgba(250,204,21,.65);box-shadow:0 0 18px rgba(250,204,21,.28),inset 0 0 12px rgba(250,204,21,.12)}
+.chip.lv1 .cd{background:#FACC15;box-shadow:0 0 10px #FACC15}.chip.lv1 b{color:#FDE047}
+.chip.lv2{background:linear-gradient(135deg,rgba(249,115,22,.34),rgba(249,115,22,.08));border-color:rgba(249,115,22,.7);box-shadow:0 0 18px rgba(249,115,22,.32),inset 0 0 12px rgba(249,115,22,.14)}
+.chip.lv2 .cd{background:#F97316;box-shadow:0 0 10px #F97316}.chip.lv2 b{color:#FDBA74}
 #stats{display:flex;flex:1;justify-content:space-between}
 .st{display:flex;align-items:baseline;white-space:nowrap}
 .st .lb{font-size:17px;color:#9FB4CE;margin-right:8px}
@@ -778,11 +782,18 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .l1{background:#EF4444;color:#fff}.l2{background:#F97316;color:#111}.l3{background:#FACC15;color:#111}
 .sol{color:#22D3EE;font-weight:700}
 /* 두 칸 */
-.two{display:grid;grid-template-columns:1fr 1fr;column-gap:14px}
+.two{display:grid;grid-template-columns:1fr 1fr;column-gap:10px}
 .two .panel{padding:14px 18px}
 .mini{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:20px;line-height:26px}
 .mini:last-child{border-bottom:0}
 .mini b{display:inline-block;min-width:54px;text-align:center;border-radius:6px;margin-right:8px;padding:0 6px;font-size:19px}
+.m1{display:flex;align-items:center;white-space:nowrap;overflow:hidden;line-height:28px}
+.m1 .atk{margin-right:8px;flex:none}
+.m1 .cv{font-family:Consolas,monospace;font-size:20px;font-weight:700;color:#22D3EE;margin-right:10px;flex:none}
+.m1 .pr{font-size:18px;color:#9FB4CE;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.m1 .ef{font-size:20px;font-weight:700;color:#E5EEF9;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.m2{font-size:19px;line-height:26px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m2 i{font-style:normal;color:#7C93B2}
 .sc9{background:#EF4444;color:#fff}.sc7{background:#F97316;color:#111}
 .empty{color:#7C93B2;font-size:20px;padding:10px 0}
 /* 차트 */
@@ -864,7 +875,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
     <div id="stats">
       <div class="st"><span class="lb">신규 악용(2일)</span><b id="c1">0</b><em>건</em></div>
       <div class="st"><span class="lb">Critical CVE(2일)</span><b id="c2">0</b><em>건</em></div>
-      <div class="st"><span class="lb">취급 제품(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
+      <div class="st"><span class="lb">취급 제조사(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
     </div>
   </div>
 
@@ -984,8 +995,8 @@ var RENDER={
  news:function(n){return A('row',n.link,'<span class="src">'+esc(n.src)+'</span><div class="t">'+esc(n.title)+'</div><span class="ago">'+ago(n.ts)+'</span>')},
  kev:function(v){return A('kev',NVD+v.cve,'<div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div>')},
  events:evHtml,
- nvd:function(v){return A('mini',NVD+v.cve,'<b class="'+(v.score>=9?'sc9':'sc7')+'">'+v.score+'</b><span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span><span style="color:#22D3EE;font-weight:700;font-size:17px">'+esc(v.cve)+'</span><div style="font-size:18px;line-height:22px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(v.cat)+' · '+esc(v.eff)+'</div><div style="font-size:14px;line-height:17px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(v.prod)+'</div>')},
- psirt:function(p){return A('mini',p.link,'<span class="atk l'+(p.lvl||3)+'">'+esc(p.atk)+'</span>'+(p.sev?'<span class="atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'">'+esc(p.sev)+'</span>':'')+'<span style="font-size:18px;color:#C7D6EA">'+esc(p.eff)+'</span><div style="font-size:15px;line-height:20px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(p.title)+' · '+ago(p.ts)+'</div>')}
+ nvd:function(v){return A('mini',NVD+v.cve,'<div class=\"m1\"><b class=\"'+(v.score>=9?'sc9':'sc7')+'\">'+v.score+'</b><span class=\"atk l'+(v.lvl||3)+'\">'+esc(v.atk)+'</span><span class=\"cv\">'+esc(v.cve)+'</span><span class=\"pr\">'+esc(v.prod)+'</span></div><div class=\"m2\">'+esc(v.cat)+' <i>·</i> '+esc(v.eff)+'</div>')},
+ psirt:function(p){return A('mini',p.link,'<div class=\"m1\"><span class=\"atk l'+(p.lvl||3)+'\">'+esc(p.atk)+'</span>'+(p.sev?'<span class=\"atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'\">'+esc(p.sev)+'</span>':'')+'<span class=\"ef\">'+esc(p.eff)+'</span></div><div class=\"m2\">'+esc(p.title)+' <i>· '+ago(p.ts)+'</i></div>')}
 };
 function pages(name){return Math.max(1,Math.min(MAXP[name],Math.ceil(LIST[name].length/PER[name])))}
 function paint(name){
@@ -1024,7 +1035,7 @@ function renderStatus(st){
  st=st||{};
  var lv={'안정':0,'주의':1,'경계':2}[st.level];if(lv==null)lv=0;
  $('chip').className='chip lv'+lv;
- $('chip').innerHTML='위협 수준<b>'+esc(st.level||'-')+'</b><small>자체 산정</small>';
+ $('chip').innerHTML='<i class="cd"></i><span class="cl">위협 수준</span><b>'+esc(st.level||'-')+'</b>';
  countTo($('c1'),st.new2);countTo($('c2'),st.nvd);countTo($('c3'),st.ours7);
  $('c3id').textContent=(st.ours7_ids||[]).join(', ')}
 
