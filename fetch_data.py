@@ -176,4 +176,209 @@ def parse_rss(url, source):
             "title": title,
             "link": (it.findtext("link") or "").strip(),
             "ts": to_epoch(pub),
-            "desc": clean(it.
+            "desc": clean(it.findtext("description") or it.findtext("{http://www.w3.org/2005/Atom}summary") or "")[:400],
+        })
+    return out
+
+
+# ----------------------------- 취약점 한글 분류 -----------------------------
+ATTACKS = [
+    (("remote code execution", "arbitrary code", "code execution", "command injection", "os command",
+      "code injection", "deserialization"), "원격 코드 실행", "서버를 원격으로 장악", 1),
+    (("authentication bypass", "improper authentication", "missing authentication", "authorization bypass",
+      "default credential", "hard-coded", "hardcoded", "auth bypass"), "인증 우회", "로그인 없이 접근", 1),
+    (("privilege escalation", "elevation of privilege", "improper privilege", "privilege"),
+     "권한 상승", "관리자 권한 탈취", 1),
+    (("sql injection",), "SQL 인젝션", "DB 정보 탈취·변조", 1),
+    (("xml external entity", "xxe", "server-side request forgery", "ssrf"), "XXE·SSRF", "내부 정보 유출", 2),
+    (("path traversal", "directory traversal", "file upload", "arbitrary file", "file read", "file inclusion"),
+     "파일 조작·탈취", "서버 파일 열람·유출", 2),
+    (("security feature bypass", "bypass"), "보안 기능 우회", "방어 장치 무력화", 2),
+    (("buffer overflow", "use after free", "use-after-free", "out-of-bounds", "memory corruption", "heap",
+      "type confusion"), "메모리 손상", "코드 실행·장애 유발", 2),
+    (("denial of service", "denial-of-service", "resource exhaustion", "crash"),
+     "서비스 거부(DoS)", "장비 중단·마비", 3),
+    (("cross-site scripting", "xss"), "XSS", "악성 스크립트 실행", 3),
+    (("information disclosure", "sensitive information", "information exposure", "information leak", "disclosure"),
+     "정보 노출", "민감정보 유출", 3),
+]
+DEFAULT_ATK = ("기타 취약점", "상세 내용은 원문 확인", 3)
+
+DEFAULT_CAT = "기타 SW·장비"
+CATS = [
+    (("vpn", "firewall", "adaptive security appliance", "asa", "ftd", "firepower", "fortios", "axgate",
+      "pan-os", "sonicwall", "globalprotect", "netscaler", "big-ip", "secure client"), "방화벽·VPN"),
+    (("exchange", "mail", "webmail", "zimbra", "roundcube", "postfix", "esa"), "메일 서버"),
+    (("chrome", "chromium", "firefox", "edge", "safari", "browser", "webkit"), "웹 브라우저"),
+    (("windows", "kernel", "linux", "ubuntu", "android", "ios", "macos", "apple"), "OS·커널"),
+    (("wordpress", "php", "apache", "nginx", "tomcat", "iis", "node.js", "openssh", "ssh", "web", "joomla",
+      "drupal", "struts", "spring"), "웹·서버 SW"),
+    (("sql", "oracle", "mysql", "postgres", "postgresql", "database", "mongodb", "redis"), "데이터베이스"),
+    (("router", "switch", "meraki", "access point", "wlc", "camera", "nas", "synology", "qnap", "d-link",
+      "dlink", "tp-link", "zyxel"), "네트워크·IoT 장비"),
+    (("vmware", "esxi", "vcenter", "hyper-v", "citrix", "kubernetes", "docker", "gitlab", "jenkins", "ibm",
+      "sap", "gpustack", "aispera"), "서버·플랫폼"),
+]
+SOL = {
+    "방화벽·VPN": "AXGATE·Cisco FirePower",
+    "메일 서버": "Cisco ESA",
+    "웹·서버 SW": "SolidStep·MetiEye",
+    "OS·커널": "지니언스 EDR",
+    "웹 브라우저": "지니언스 EDR",
+    "데이터베이스": "넷앤드 DB접근통제",
+    "네트워크·IoT 장비": "지니언스 NAC·Meraki",
+    "서버·플랫폼": "SolidStep·넷앤드 PSM",
+    "Cisco 장비·SW": "Cisco 보안 패치",
+    DEFAULT_CAT: "Ai-Spera CTI",
+}
+OUR_VENDORS = ("cisco", "genians", "axgate", "netand", "ai-spera", "ssr")
+SEV_KO = {"Critical": "치명", "High": "높음", "Medium": "중간", "Low": "낮음"}
+
+
+def classify(*texts):
+    for t in texts:
+        low = (t or "").lower()
+        for keys, label, eff, lvl in ATTACKS:
+            if any(k in low for k in keys):
+                return label, eff, lvl
+    return DEFAULT_ATK
+
+
+def categorize(text):
+    low = (text or "").lower()
+    for keys, cat in CATS:
+        if any(re.search(r"\b" + re.escape(k) + r"\b", low) for k in keys):
+            return cat
+    return DEFAULT_CAT
+
+
+def guess_product(desc):
+    try:
+        m = re.search(r"(?:vulnerability|flaw|issue|weakness) in (?:the )?(.{4,60}?)"
+                      r"(?: (?:of|could|allows|that|which|before|prior|through|version)\b|[,.;(])", desc, re.I)
+        if m:
+            return m.group(1).strip()
+        m = re.match(r"(.{4,40}?)(?: (?:before|prior to|through|version|allows|is|in|up to)\b|[,(])", desc)
+        return (m.group(1) if m else desc[:40]).strip()
+    except Exception:
+        return desc[:40]
+
+
+def kev_item(v):
+    name = v.get("vulnerabilityName", "")
+    vendor = v.get("vendorProject", "")
+    product = v.get("product", "")
+    short = v.get("shortDescription", "")
+    atk, eff, lvl = classify(name, short)
+    cat = categorize(" ".join([vendor, product, name, short]))
+    if cat == DEFAULT_CAT and "cisco" in vendor.lower():
+        cat = "Cisco 장비·SW"
+    return {
+        "cve": v.get("cveID", ""),
+        "vendor": vendor,
+        "product": product,
+        "name": name,
+        "added": v.get("dateAdded", ""),
+        "due": v.get("dueDate", ""),
+        "ransom": v.get("knownRansomwareCampaignUse", "") == "Known",
+        "ours": any(k in vendor.lower() for k in OUR_VENDORS),
+        "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sol": SOL.get(cat, SOL[DEFAULT_CAT]),
+    }
+
+
+def psirt_item(x):
+    desc = x.get("desc", "")
+    atk, eff, lvl = classify(x["title"], desc)
+    cat = categorize(x["title"])
+    if cat == DEFAULT_CAT:
+        cat = "Cisco 장비·SW"
+    m = re.search(r"(?:Impact Rating|Severity)\W{0,6}(Critical|High|Medium|Low)", desc, re.I)
+    sev = SEV_KO.get(m.group(1).capitalize(), "") if m else ""
+    title = re.sub(r"\s+Vulnerabilit(?:y|ies)\$", "", x["title"])
+    return {"title": title, "link": x.get("link", ""), "ts": x["ts"],
+            "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev}
+
+
+# ----------------------------- 수집 -----------------------------
+def fetch_news():
+    items, ok = [], 0
+    for name, url in NEWS_FEEDS:
+        try:
+            items += parse_rss(url, name)
+            ok += 1
+        except Exception as e:
+            print("[실패] 뉴스", name, e)
+    if ok == 0:
+        raise RuntimeError("모든 뉴스 피드 실패")
+    seen, uniq = set(), []
+    for it in sorted(items, key=lambda x: x["ts"], reverse=True):
+        key = re.sub(r"\W", "", it["title"])[:30]
+        if key in seen:
+            continue
+        seen.add(key)
+        it.pop("desc", None)
+        uniq.append(it)
+    cutoff = time.time() - 48 * 3600
+    recent = [x for x in uniq if x["ts"] >= cutoff]
+    return (recent if len(recent) >= 12 else uniq)[:30]
+
+
+def load_kev():
+    global _KEV_CACHE
+    if _KEV_CACHE is None:
+        _KEV_CACHE = json.loads(http_get(KEV_URL, 40).decode("utf-8"))
+    return _KEV_CACHE
+
+
+def fetch_kev():
+    data = load_kev()
+    vulns = sorted(data.get("vulnerabilities", []),
+                   key=lambda v: (v.get("dateAdded", ""), v.get("cveID", "")), reverse=True)[:8]
+    return [kev_item(v) for v in vulns]
+
+
+def fetch_nvd():
+    global _NVD_TOTAL
+    now = dt.datetime.now(dt.timezone.utc)
+    start = now - dt.timedelta(days=2)
+    q = urllib.parse.urlencode({
+        "cvssV3Severity": "CRITICAL",
+        "pubStartDate": start.strftime("%Y-%m-%dT%H:%M:%S.000"),
+        "pubEndDate": now.strftime("%Y-%m-%dT%H:%M:%S.000"),
+        "resultsPerPage": 50,
+    })
+    data = json.loads(http_get("https://services.nvd.nist.gov/rest/json/cves/2.0?" + q, 40).decode("utf-8"))
+    out = []
+    for v in data.get("vulnerabilities", []):
+        c = v.get("cve", {})
+        score = 0
+        for k in ("cvssMetricV31", "cvssMetricV40", "cvssMetricV30"):
+            if c.get("metrics", {}).get(k):
+                score = c["metrics"][k][0]["cvssData"].get("baseScore", 0)
+                break
+        desc = next((d["value"] for d in c.get("descriptions", []) if d.get("lang") == "en"), "")
+        atk, eff, lvl = classify(desc)
+        out.append({"cve": c.get("id", ""), "score": score, "desc": clean(desc)[:110],
+                    "atk": atk, "eff": eff, "lvl": lvl, "cat": categorize(desc),
+                    "prod": guess_product(clean(desc))})
+    out.sort(key=lambda x: x["score"], reverse=True)
+    _NVD_TOTAL = int(data.get("totalResults", len(out)) or 0)
+    return out[:12]
+
+
+def fetch_psirt():
+    items = parse_rss(CISCO_PSIRT, "Cisco")
+    items.sort(key=lambda x: x["ts"], reverse=True)
+    return [psirt_item(x) for x in items[:12]]
+
+
+DATE_RE = re.compile(r"(20\d{2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})")
+
+
+def find_dates(text):
+    out = []
+    for m in DATE_RE.finditer(text or ""):
+        try:
+            out.append(dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        except ValueError:
+            pass
