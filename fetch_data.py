@@ -48,7 +48,7 @@ THREAT_MID = 5     # 이 점수 이상이면 "주의"
 THREAT_HIGH = 10   # 이 점수 이상이면 "경계"
 
 # 자동 넘김 간격(초). 0 이면 끔 (기본: 수동 넘김 - 버튼 또는 좌우 드래그)
-AUTO = {"news": 0, "kev": 0, "nvd": 0, "psirt": 0, "events": 0}
+AUTO = {"news": 0, "kev": 0, "events": 0, "nvd": 0, "psirt": 0}
 
 # ---- 국내 보안행사 수집 대상 (부산 기관 게시판) ----
 #   require_param : 게시글 링크(또는 속성)에 이 문자열이 있는 항목만 게시글로 인정
@@ -182,6 +182,8 @@ def parse_rss(url, source):
 
 
 # ----------------------------- 취약점 한글 분류 -----------------------------
+# 공격 유형: (영어 키워드들, 한글 이름, 한 줄 영향 설명, 위험 등급 1=빨강 2=주황 3=노랑)
+# 위에서부터 먼저 일치하는 것이 적용되므로 순서를 바꾸지 마세요.
 ATTACKS = [
     (("remote code execution", "arbitrary code", "code execution", "command injection", "os command",
       "code injection", "deserialization"), "원격 코드 실행", "서버를 원격으로 장악", 1),
@@ -204,6 +206,7 @@ ATTACKS = [
 ]
 DEFAULT_ATK = ("기타 취약점", "상세 내용은 원문 확인", 3)
 
+# 대상 분류: (영어 단어들, 분류 이름)
 DEFAULT_CAT = "기타 SW·장비"
 CATS = [
     (("vpn", "firewall", "adaptive security appliance", "asa", "ftd", "firepower", "fortios", "axgate",
@@ -219,6 +222,7 @@ CATS = [
     (("vmware", "esxi", "vcenter", "hyper-v", "citrix", "kubernetes", "docker", "gitlab", "jenkins", "ibm",
       "sap", "gpustack", "aispera"), "서버·플랫폼"),
 ]
+# 분류별 우리 취급 솔루션 제안 (영업 포인트)
 SOL = {
     "방화벽·VPN": "AXGATE·Cisco FirePower",
     "메일 서버": "Cisco ESA",
@@ -236,6 +240,7 @@ SEV_KO = {"Critical": "치명", "High": "높음", "Medium": "중간", "Low": "�
 
 
 def classify(*texts):
+    """제목/설명에서 공격 유형을 찾아 (한글 이름, 영향 설명, 등급) 반환"""
     for t in texts:
         low = (t or "").lower()
         for keys, label, eff, lvl in ATTACKS:
@@ -253,6 +258,7 @@ def categorize(text):
 
 
 def guess_product(desc):
+    """NVD 영문 설명에서 제품명 부분만 대략 추출"""
     try:
         m = re.search(r"(?:vulnerability|flaw|issue|weakness) in (?:the )?(.{4,60}?)"
                       r"(?: (?:of|could|allows|that|which|before|prior|through|version)\b|[,.;(])", desc, re.I)
@@ -294,12 +300,12 @@ def psirt_item(x):
         cat = "Cisco 장비·SW"
     m = re.search(r"(?:Impact Rating|Severity)\W{0,6}(Critical|High|Medium|Low)", desc, re.I)
     sev = SEV_KO.get(m.group(1).capitalize(), "") if m else ""
-    title = re.sub(r"\s+Vulnerabilit(?:y|ies)\$", "", x["title"])
+    title = re.sub(r"\s+Vulnerabilit(?:y|ies)$", "", x["title"])
     return {"title": title, "link": x.get("link", ""), "ts": x["ts"],
             "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev}
 
 
-# ----------------------------- 수집 -----------------------------
+# ----------------------------- 수집: 뉴스 / 취약점 -----------------------------
 def fetch_news():
     items, ok = [], 0
     for name, url in NEWS_FEEDS:
@@ -363,15 +369,16 @@ def fetch_nvd():
                     "prod": guess_product(clean(desc))})
     out.sort(key=lambda x: x["score"], reverse=True)
     _NVD_TOTAL = int(data.get("totalResults", len(out)) or 0)
-    return out[:12]
+    return out[:6]
 
 
 def fetch_psirt():
     items = parse_rss(CISCO_PSIRT, "Cisco")
     items.sort(key=lambda x: x["ts"], reverse=True)
-    return [psirt_item(x) for x in items[:12]]
+    return [psirt_item(x) for x in items[:6]]
 
 
+# ----------------------------- 수집: 국내 보안행사 -----------------------------
 DATE_RE = re.compile(r"(20\d{2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})")
 
 
@@ -395,6 +402,7 @@ def event_type(title, given=""):
 
 
 def passes(title, need_event):
+    """보안 키워드가 있고, 입찰·채용·종료 공고가 아니며, (필요하면) 행사 단어가 있어야 통과"""
     low = title.lower()
     if not any(k in low for k in SEC_KW):
         return False
@@ -406,6 +414,7 @@ def passes(title, need_event):
 
 
 def load_registered_events():
+    """events.json 에 직접 등록한 확정 일정 (지난 행사는 숨김)"""
     today = dt.datetime.now(KST).date()
     out = []
     if not EVENTS_FILE.exists():
@@ -419,8 +428,8 @@ def load_registered_events():
         try:
             s = dt.date.fromisoformat(str(e["date"]))
             en = dt.date.fromisoformat(str(e.get("end") or e["date"]))
-        except Exception as e2:
-            print("[경고] events.json 날짜 형식 오류:", e2)
+        except Exception:
+            print("[경고] events.json 날짜 형식 오류:", e)
             continue
         if en < today:
             continue
@@ -433,6 +442,7 @@ def load_registered_events():
 
 
 def scrape_site(site):
+    """게시판 목록 HTML 에서 게시글 링크를 찾아 보안 관련 항목만 추출 (사이트별 구조를 몰라도 동작하는 범용 방식)"""
     page = decode_html(http_get(site["url"], 30))
     today = dt.datetime.now(KST).date()
     out, seen = [], set()
@@ -466,6 +476,7 @@ def scrape_site(site):
 
 
 def fetch_bexco():
+    """벡스코 행사일정 목록에서 보안 관련 행사만 추출 (날짜 범위 포함)"""
     page = decode_html(http_get(BEXCO_URL, 30))
     today = dt.datetime.now(KST).date()
     out, seen = [], set()
@@ -510,6 +521,7 @@ def fetch_bexco():
 
 
 def fetch_event_search():
+    """(선택) 검색 RSS 에서 교육·세미나·컨퍼런스 모집·공지 기사만 후보로 모음"""
     found, seen = [], set()
     cutoff = time.time() - 21 * 86400
     for url in EVENT_SEARCH:
@@ -577,6 +589,7 @@ def fetch_events():
     return allv[:20]
 
 
+# ----------------------------- 수집: 날씨 -----------------------------
 def fetch_weather():
     q = urllib.parse.urlencode({
         "latitude": BUSAN[0], "longitude": BUSAN[1],
@@ -596,10 +609,12 @@ def fetch_weather():
     return {"temp": round(d["current"]["temperature_2m"]), "code": d["current"]["weather_code"], "days": days}
 
 
+# ----------------------------- 통계 (위협 수준 / 30일 공격 유형) -----------------------------
 def build_stats(psirt, prev_nvd=0):
     kev = _KEV_CACHE
     if not kev:
         raise RuntimeError("KEV 데이터 없음")
+    # CISA 등재일은 미국 기준이라 UTC 날짜를 기준으로 계산
     anchor = dt.datetime.now(dt.timezone.utc).date()
     s30 = (anchor - dt.timedelta(days=29)).isoformat()
     s7 = (anchor - dt.timedelta(days=6)).isoformat()
@@ -640,7 +655,9 @@ def build_stats(psirt, prev_nvd=0):
     }
 
 
+# ----------------------------- 실행 -----------------------------
 def load_prev():
+    """수집 실패 시 직전 data.json 을 재사용 (배포된 Pages 에서 가져옴)"""
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if "/" not in repo:
         return {}
@@ -672,10 +689,9 @@ def main():
         print("[실패] stats", e)
         data["errors"].append("stats")
         data["stats"] = prev.get("stats", {})
-    
-    # 📌 site 폴더가 반드시 생성되도록 보장 (GitHub Actions 배포 오류 방지)
     OUT.mkdir(exist_ok=True)
     (OUT / "data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    # AUTO 설정을 화면(JS)에 전달 (이 값이 없으면 화면 스크립트가 멈춰 빈 화면이 됩니다)
     (OUT / "index.html").write_text(INDEX_HTML.replace("__AUTO__", json.dumps(AUTO)), encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
     print("완료:", len(data["news"]), "news,", len(data["kev"]), "kev,", len(data["events"]), "events")
@@ -693,7 +709,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 180px 180px 1fr 52px 28px;row-gap:10px}
+ padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 180px 220px 1fr 52px 28px;row-gap:10px}
 .panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:16px 22px;overflow:hidden;position:relative}
 .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1;min-width:0}
@@ -701,4 +717,386 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .pg{display:flex;align-items:center;flex:none;margin-left:10px}
 .pb{width:44px;height:38px;border:0;border-radius:10px;background:rgba(34,211,238,.15);color:#22D3EE;font-size:28px;font-weight:900;line-height:36px;cursor:pointer;margin-left:6px}
 .pb:hover,.pb:focus{outline:2px solid #22D3EE;outline-offset:1px}
-.pd{display:inline-block;margin:0 6px;min-width
+.pd{display:inline-block;margin:0 6px;min-width:44px;text-align:center;font-size:20px;font-weight:700;color:#7C93B2}
+.fade{transition:opacity .25s ease;min-height:0}
+.fade.out{opacity:0}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+/* 헤더 */
+#head{display:grid;grid-template-columns:1fr auto;align-items:center;padding:0 10px}
+.brand{display:flex;align-items:center}
+.brand svg{margin-right:16px}
+.brand b{font-size:40px;font-weight:900;letter-spacing:-1px;display:block;line-height:1.1}
+.brand span{font-size:20px;color:#7C93B2}
+.clock{text-align:right}
+#clock{font-size:60px;font-weight:900;color:#22D3EE;line-height:60px;letter-spacing:-2px}
+#date{font-size:22px;font-weight:700;line-height:28px}
+/* 상태 바 */
+#status{display:flex;align-items:center;padding:6px 18px}
+.chip{display:flex;align-items:baseline;font-size:20px;font-weight:700;padding:4px 16px;border-radius:12px;background:rgba(255,255,255,.08);margin-right:22px;white-space:nowrap}
+.chip b{font-size:30px;font-weight:900;margin-left:8px}
+.chip small{font-size:13px;margin-left:8px;opacity:.7;font-weight:500}
+.chip.lv0{background:#34D399;color:#04281c}
+.chip.lv1{background:#FACC15;color:#111}
+.chip.lv2{background:#F97316;color:#111}
+#stats{display:flex;flex:1;justify-content:space-between}
+.st{display:flex;align-items:baseline;white-space:nowrap}
+.st .lb{font-size:17px;color:#9FB4CE;margin-right:8px}
+.st b{font-size:38px;font-weight:900;color:#22D3EE;line-height:1}
+.st em{font-style:normal;font-size:17px;color:#9FB4CE;margin-left:3px}
+.st .cid{font-family:Consolas,monospace;font-size:15px;color:#F97316;margin-left:8px}
+/* 날씨 */
+#wx{display:grid;grid-template-columns:270px 1fr;column-gap:18px;padding:12px 18px}
+.now{border-right:1px solid rgba(34,211,238,.18);padding-right:14px}
+.now .big{font-size:56px;font-weight:900;line-height:1}
+.now .cond{font-size:21px;font-weight:700;color:#A9C1DE;line-height:24px}
+.week{display:grid;grid-template-columns:repeat(7,1fr);column-gap:8px}
+.day{text-align:center;border-radius:14px;padding:4px 2px;background:rgba(255,255,255,.04)}
+.day.today{border:2px solid #22D3EE;background:rgba(34,211,238,.1)}
+.day.rain{background:rgba(59,130,246,.22)}
+.day .dn{font-size:20px;font-weight:700;line-height:24px}
+.day .dd{font-size:14px;color:#7C93B2;line-height:16px}
+.day .tt{font-size:20px;font-weight:700;line-height:24px}
+.day .tt i{font-style:normal;color:#7C93B2;font-weight:500}
+.day .pp{font-size:15px;color:#60A5FA;line-height:18px}
+/* 뉴스 행 */
+.row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.row:last-child{border-bottom:0}
+.src{font-size:17px;font-weight:700;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE}
+.t{font-size:25px;font-weight:700;line-height:1.28;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ago{font-size:17px;color:#7C93B2;text-align:right}
+/* 긴급 취약점 */
+.kev{display:grid;grid-template-columns:215px 1fr 120px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.kev:last-child{border-bottom:0}
+.cve{font-family:Consolas,monospace;font-size:23px;font-weight:700;color:#22D3EE}
+.kev .a{font-size:24px;font-weight:700;line-height:30px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kev .b{font-size:19px;line-height:24px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.due{font-size:17px;text-align:right;color:#F97316;font-weight:700}
+.tag{display:inline-block;font-size:15px;font-weight:900;padding:1px 8px;border-radius:6px;margin-right:8px;vertical-align:middle}
+.tag.our{background:#F97316;color:#111}
+.tag.rw{background:#EF4444;color:#fff}
+.atk{display:inline-block;font-size:17px;font-weight:900;padding:1px 9px;border-radius:6px;margin-right:8px;vertical-align:middle;line-height:22px}
+.l1{background:#EF4444;color:#fff}.l2{background:#F97316;color:#111}.l3{background:#FACC15;color:#111}
+.sol{color:#22D3EE;font-weight:700}
+/* 두 칸 */
+.two{display:grid;grid-template-columns:1fr 1fr;column-gap:14px}
+.two .panel{padding:14px 18px}
+.mini{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:20px;line-height:26px}
+.mini:last-child{border-bottom:0}
+.mini b{display:inline-block;min-width:54px;text-align:center;border-radius:6px;margin-right:8px;padding:0 6px;font-size:19px}
+.sc9{background:#EF4444;color:#fff}.sc7{background:#F97316;color:#111}
+.empty{color:#7C93B2;font-size:20px;padding:10px 0}
+/* 차트 */
+#chart{display:grid;grid-template-columns:1fr;padding:12px 22px}
+.dn2{display:flex;align-items:center;height:140px}
+.dnw{position:relative;width:132px;height:132px;margin-right:26px;flex:none}
+.dnc{position:absolute;left:0;top:0;width:132px;height:132px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.dnc b{font-size:34px;font-weight:900;line-height:1}
+.dnc span{font-size:15px;color:#7C93B2}
+.lgs{display:grid;grid-template-columns:1fr 1fr;column-gap:26px;row-gap:6px;flex:1}
+.lg{font-size:19px;line-height:24px;white-space:nowrap;display:flex;align-items:center}
+.lg i{width:14px;height:14px;border-radius:4px;margin-right:9px;flex:none}
+.lg b{margin-left:auto;color:#22D3EE;font-size:20px}
+/* 국내 보안행사 */
+.ev{display:grid;grid-template-columns:1fr 110px;column-gap:14px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.ev:last-child{border-bottom:0}
+.evl{display:flex;align-items:center;margin-bottom:2px}
+.dt{font-size:20px;font-weight:900;color:#22D3EE;white-space:nowrap;margin-right:10px}
+.tt2{font-size:23px;font-weight:700;line-height:30px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pl{font-size:17px;line-height:22px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.evm{min-width:0}
+.bd{font-size:18px;font-weight:900;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE;white-space:nowrap}
+.bd.hot{background:#EF4444;color:#fff}
+.bd.soon{background:#F97316;color:#111}
+.bd.nw{background:rgba(255,255,255,.08);color:#9FB4CE;font-weight:500;font-size:16px}
+.tg{display:inline-block;font-size:15px;font-weight:900;padding:1px 9px;border-radius:6px;margin-right:8px;vertical-align:middle;white-space:nowrap}
+.tgE{background:#34D399;color:#04281c}
+.tgS{background:#F97316;color:#111}
+.tgN{background:rgba(34,211,238,.2);color:#22D3EE}
+/* 티커 */
+#ticker{padding:0 18px;display:flex;align-items:center;overflow:hidden}
+.live{font-size:18px;font-weight:900;color:#22D3EE;margin-right:16px;white-space:nowrap;display:flex;align-items:center}
+.live i{display:inline-block;width:12px;height:12px;border-radius:50%;background:#34D399;margin-right:8px;animation:blink 1s infinite}
+#tkmask{flex:1;overflow:hidden;white-space:nowrap}
+#tk{display:inline-block;white-space:nowrap;will-change:transform}
+@keyframes tkscroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.ti{display:inline-block;font-size:24px;font-weight:700;margin-right:56px}
+.tg2{display:inline-block;font-size:16px;font-weight:900;padding:1px 9px;border-radius:6px;margin-right:10px;vertical-align:middle}
+.tgC{background:#F97316;color:#111}
+/* 링크 */
+a.lk{color:inherit;text-decoration:none;cursor:pointer}
+a.mini{display:block}
+a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius:8px;background:rgba(34,211,238,.08)}
+#foot{display:flex;justify-content:space-between;align-items:center;font-size:18px;color:#7C93B2;padding:0 10px}
+#foot .bad{color:#FACC15;font-weight:900}
+.pulse{display:inline-block;width:10px;height:10px;border-radius:50%;background:#34D399;margin-right:8px;animation:blink 2s infinite}
+</style>
+</head>
+<body>
+<div id="board">
+  <div id="head">
+    <div class="brand">
+      <svg width="370" height="100" viewBox="0 0 370 100">
+        <defs>
+          <linearGradient id="lgO" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F9A83F"/><stop offset="1" stop-color="#E8590C"/></linearGradient>
+          <linearGradient id="lgG1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#C9C9C9"/><stop offset="1" stop-color="#9A9A9A"/></linearGradient>
+          <linearGradient id="lgG2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8E8E8E"/><stop offset="1" stop-color="#5F5F5F"/></linearGradient>
+          <linearGradient id="lgG3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#E3E3E3"/><stop offset="1" stop-color="#BDBDBD"/></linearGradient>
+        </defs>
+        <g stroke="#0A1428" stroke-width="2.6" stroke-linejoin="round">
+          <polygon points="48,6 86.1,28 63.6,41 48,32" fill="url(#lgO)"/>
+          <polygon points="86.1,28 86.1,72 63.6,59 63.6,41" fill="url(#lgO)"/>
+          <polygon points="86.1,72 48,94 48,68 63.6,59" fill="url(#lgG2)"/>
+          <polygon points="48,94 9.9,72 32.4,59 48,68" fill="url(#lgG1)"/>
+          <polygon points="9.9,72 9.9,28 32.4,41 32.4,59" fill="url(#lgG3)"/>
+          <polygon points="9.9,28 48,6 48,32 32.4,41" fill="url(#lgG3)"/>
+          <polygon points="48,32 63.6,41 63.6,59 48,68 32.4,59 32.4,41" fill="#E6E6E6"/>
+        </g>
+        <text x="106" y="58" font-family="'Malgun Gothic','Noto Sans KR',sans-serif" font-size="29" font-weight="900" fill="#FFFFFF">(주)비테크놀로지</text>
+        <text x="108" y="83" font-family="Arial,'Noto Sans KR',sans-serif" font-size="17" font-weight="700" letter-spacing="1.6" fill="#9FB4CE">BEE TECHNOLOGY</text>
+      </svg>
+      <div style="margin-left:22px"><b style="font-size:34px">오늘의 보안 브리핑</b><span>Daily Security Briefing</span></div>
+    </div>
+    <div class="clock"><div id="clock">--:--</div><div id="date"></div></div>
+  </div>
+
+  <div id="status" class="panel">
+    <div id="chip" class="chip lv0">위협 수준<b>-</b><small>자체 산정</small></div>
+    <div id="stats">
+      <div class="st"><span class="lb">신규 악용(2일)</span><b id="c1">0</b><em>건</em></div>
+      <div class="st"><span class="lb">Critical CVE(2일)</span><b id="c2">0</b><em>건</em></div>
+      <div class="st"><span class="lb">취급 제품(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
+    </div>
+  </div>
+
+  <div id="wx" class="panel"></div>
+
+  <div class="panel">
+    <div class="hd"><div class="ttl">오늘의 보안뉴스<small>어제·오늘</small></div>
+      <div class="pg"><button class="pb" onclick="nav('news',-1)">&lsaquo;</button><span class="pd" id="d-news"></span><button class="pb" onclick="nav('news',1)">&rsaquo;</button></div></div>
+    <div id="news" class="fade"></div>
+  </div>
+
+  <div class="panel">
+    <div class="hd"><div class="ttl">긴급 취약점<small>실제 공격에 악용 중 · 위험 유형과 우리 대응 솔루션</small></div>
+      <div class="pg"><button class="pb" onclick="nav('kev',-1)">&lsaquo;</button><span class="pd" id="d-kev"></span><button class="pb" onclick="nav('kev',1)">&rsaquo;</button></div></div>
+    <div id="kev" class="fade"></div>
+  </div>
+
+  <div class="two">
+    <div class="panel"><div class="hd" style="height:29px"><div class="ttl">신규 Critical CVE<small>NVD</small></div>
+      <div class="pg"><button class="pb" onclick="nav('nvd',-1)">&lsaquo;</button><span class="pd" id="d-nvd"></span><button class="pb" onclick="nav('nvd',1)">&rsaquo;</button></div></div><div id="nvd" class="fade"></div></div>
+    <div class="panel"><div class="hd" style="height:29px"><div class="ttl">Cisco 보안 권고<small>PSIRT</small></div>
+      <div class="pg"><button class="pb" onclick="nav('psirt',-1)">&lsaquo;</button><span class="pd" id="d-psirt"></span><button class="pb" onclick="nav('psirt',1)">&rsaquo;</button></div></div><div id="psirt" class="fade"></div></div>
+  </div>
+
+  <div id="chart" class="panel">
+    <div class="hd" style="margin-bottom:4px"><div class="ttl">공격 유형 비율<small>CISA 악용 취약점 · 최근 30일</small></div></div>
+    <div id="donut"></div>
+  </div>
+
+  <div class="panel">
+    <div class="hd"><div class="ttl">국내 보안 행사<small>교육·세미나·컨퍼런스 · 벡스코·부산 기관</small></div>
+      <div class="pg"><button class="pb" onclick="nav('events',-1)">&lsaquo;</button><span class="pd" id="d-events"></span><button class="pb" onclick="nav('events',1)">&rsaquo;</button></div></div>
+    <div id="events" class="fade"></div>
+  </div>
+
+  <div id="ticker" class="panel"><span class="live"><i></i>LIVE</span><div id="tkmask"><div id="tk"></div></div></div>
+
+  <div id="foot"><span><i class="pulse"></i><span id="upd">데이터 확인 중...</span></span><span>BEE TECHNOLOGY Security Board</span></div>
+</div>
+
+<script>
+var AUTO=__AUTO__;
+var W=1080,H=1920,DATA=null,DAYS=['일','월','화','수','목','금','토'];
+function $(id){return document.getElementById(id)}
+function pad(n){return n<10?'0'+n:''+n}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function fit(){var s=Math.min(window.innerWidth/W,window.innerHeight/H);$('board').style.transform='translate(-50%,-50%) scale('+s+')'}
+window.addEventListener('resize',fit);fit();
+
+var NVD='https://nvd.nist.gov/vuln/detail/';
+/* 링크가 있으면 새 탭으로 열리는 <a>, 없으면 일반 <div> */
+function A(cls,url,inner){
+ if(!/^https?:\/\//i.test(url||''))return '<div class="'+cls+'">'+inner+'</div>';
+ return '<a class="'+cls+' lk" href="'+esc(url)+'" target="_blank" rel="noopener">'+inner+'</a>'}
+
+function tick(){
+ var d=new Date();
+ $('clock').textContent=pad(d.getHours())+':'+pad(d.getMinutes());
+ $('date').textContent=d.getFullYear()+'.'+pad(d.getMonth()+1)+'.'+pad(d.getDate())+' ('+DAYS[d.getDay()]+')';
+ if(DATA){var m=Math.floor((d.getTime()/1000-DATA.generated)/60),el=$('upd');
+  if(m>60){el.innerHTML='<span class="bad">갱신 지연 ('+m+'분 전 데이터)</span>'}
+  else{el.textContent='마지막 갱신 '+(m<1?'방금':m+'분 전')+(DATA.errors&&DATA.errors.length?' (일부 수집 실패: '+DATA.errors.join(', ')+')':'')}}
+}
+function ago(ts){if(!ts)return '';var m=Math.floor((Date.now()/1000-ts)/60);if(m<60)return Math.max(m,1)+'분 전';var h=Math.floor(m/60);return h<24?h+'시간 전':Math.floor(h/24)+'일 전'}
+
+/* 날씨 아이콘 */
+function kind(c){if(c<=1)return 'sun';if(c==2)return 'part';if(c==3)return 'cloud';if(c==45||c==48)return 'fog';
+ if((c>=71&&c<=77)||c==85||c==86)return 'snow';return 'rain'}
+function label(c){var k=kind(c);return {sun:'맑음',part:'구름조금',cloud:'흐림',fog:'안개',snow:'눈',rain:c>=95?'뇌우':'비'}[k]}
+var CL='<path d="M14 38a8 8 0 0 1 2-15 11 11 0 0 1 21 3 7 7 0 0 1-1 12z" fill="#CBD5E1"/>';
+function ico(c,s){var k=kind(c),b='';
+ if(k=='sun')b='<circle cx="28" cy="28" r="10" fill="#FBBF24"/><g stroke="#FBBF24" stroke-width="3" stroke-linecap="round"><path d="M28 6v6M28 44v6M6 28h6M44 28h6M12 12l4 4M40 40l4 4M44 12l-4 4M16 40l-4 4"/></g>';
+ else if(k=='part')b='<circle cx="20" cy="20" r="9" fill="#FBBF24"/>'+CL;
+ else if(k=='cloud')b=CL;
+ else if(k=='fog')b='<g stroke="#94A3B8" stroke-width="4" stroke-linecap="round"><path d="M10 20h36M6 30h44M12 40h32"/></g>';
+ else if(k=='snow')b=CL+'<g fill="#fff"><circle cx="20" cy="46" r="3"/><circle cx="30" cy="50" r="3"/><circle cx="40" cy="46" r="3"/></g>';
+ else b=CL+'<g stroke="#60A5FA" stroke-width="3.5" stroke-linecap="round"><path d="M20 43l-3 8M30 43l-3 8M40 43l-3 8"/></g>';
+ return '<svg width="'+s+'" height="'+s+'" viewBox="0 0 56 56">'+b+'</svg>'}
+
+function todayStr(){var t=new Date();return t.getFullYear()+'-'+pad(t.getMonth()+1)+'-'+pad(t.getDate())}
+function dnum(s){var p=s.split('-');return Date.UTC(+p[0],+p[1]-1,+p[2])/864e5}
+function md(s){var p=s.split('-'),dd=new Date(+p[0],+p[1]-1,+p[2]);return pad(+p[1])+'/'+pad(+p[2])+'('+DAYS[dd.getDay()]+')'}
+
+function renderWx(w){
+ if(!w||!w.days){$('wx').innerHTML='<div class="empty">날씨 데이터 없음</div>';return}
+ var ts=todayStr();
+ var h='<div class="now"><div class="ttl" style="margin-bottom:2px">부산 날씨</div><div style="display:flex;align-items:center">'+ico(w.code,52)+'<div class="big" style="margin-left:6px">'+w.temp+'°</div></div><div class="cond">'+label(w.code)+'<br>최고 '+w.days[0].max+'° / 최저 '+w.days[0].min+'°</div></div><div class="week">';
+ for(var i=0;i<w.days.length;i++){var d=w.days[i],dt=new Date(d.date+'T00:00:00'),rain=kind(d.code)=='rain'||kind(d.code)=='snow';
+  h+='<div class="day'+(d.date==ts?' today':'')+(rain?' rain':'')+'"><div class="dn">'+(d.date==ts?'오늘':DAYS[dt.getDay()])+'</div><div class="dd">'+pad(dt.getMonth()+1)+'/'+pad(dt.getDate())+'</div>'+ico(d.code,38)+'<div class="tt">'+d.max+'° <i>'+d.min+'°</i></div><div class="pp">강수 '+d.pop+'%</div></div>'}
+ $('wx').innerHTML=h+'</div>'}
+
+/* ---------- 수동/자동 넘김 패널 (뉴스 · 긴급 취약점 · 국내 행사) ---------- */
+var LIST={news:[],kev:[],events:[],nvd:[],psirt:[]};
+var PER={news:3,kev:3,events:2,nvd:2,psirt:2};
+var MAXP={news:4,kev:3,events:6,nvd:3,psirt:3};
+var PAGE={news:0,kev:0,events:0,nvd:0,psirt:0};
+var EMPTY={
+ news:'<div class="empty">뉴스 데이터 없음</div>',
+ kev:'<div class="empty">KEV 데이터 없음</div>',
+ nvd:'<div class="empty">최근 2일간 신규 Critical 없음</div>',
+ psirt:'<div class="empty">Cisco 권고 데이터 없음</div>',
+ events:'<div class="empty">표시할 국내 보안 행사가 아직 없습니다 (events.json 에 직접 등록할 수 있습니다)</div>'};
+var SUPPRESS=0;
+function evHtml(e){
+ var ts=todayStr(),tn=dnum(ts),t=esc(e.type||'행사');
+ if(e.kind=='event'){
+  var sd=dnum(e.date),ed=dnum(e.end),bd,bc='';
+  if(tn>=sd&&tn<=ed){bd=(sd==ed)?'오늘':'진행중';bc=' hot'}
+  else{var df=sd-tn;bd='D-'+df;if(df<=7)bc=' soon'}
+  var dtx=md(e.date)+(e.end!=e.date?' ~ '+md(e.end):'')+(e.time?' '+esc(e.time):'');
+  var st=(e.src&&e.src!='등록')?'<span class="tg tgE">'+esc(e.src)+'</span>':'';
+  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="dt">'+dtx+'</span>'+st+'<span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div>'+(e.place?'<div class="pl">'+esc(e.place)+'</div>':'')+'</div><span class="bd'+bc+'">'+bd+'</span>')}
+ if(e.kind=='site'){
+  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">'+esc(e.src||'공고')+'</span><span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+(e.posted?md(e.posted)+' 게시 · ':'')+'일정은 원문에서 확인</div></div><span class="bd nw">공고</span>')}
+ return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">모집·공지</span><span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+ago(e.ts)+' 보도 · 날짜는 원문 확인</div></div><span class="bd nw">검색</span>')}
+var RENDER={
+ news:function(n){return A('row',n.link,'<span class="src">'+esc(n.src)+'</span><div class="t">'+esc(n.title)+'</div><span class="ago">'+ago(n.ts)+'</span>')},
+ kev:function(v){return A('kev',NVD+v.cve,'<div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div>')},
+ events:evHtml,
+ nvd:function(v){return A('mini',NVD+v.cve,'<b class="'+(v.score>=9?'sc9':'sc7')+'">'+v.score+'</b><span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span><span style="color:#22D3EE;font-weight:700;font-size:17px">'+esc(v.cve)+'</span><div style="font-size:18px;line-height:22px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(v.cat)+' · '+esc(v.eff)+'</div><div style="font-size:14px;line-height:17px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(v.prod)+'</div>')},
+ psirt:function(p){return A('mini',p.link,'<span class="atk l'+(p.lvl||3)+'">'+esc(p.atk)+'</span>'+(p.sev?'<span class="atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'">'+esc(p.sev)+'</span>':'')+'<span style="font-size:18px;color:#C7D6EA">'+esc(p.eff)+'</span><div style="font-size:15px;line-height:20px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(p.title)+' · '+ago(p.ts)+'</div>')}
+};
+function pages(name){return Math.max(1,Math.min(MAXP[name],Math.ceil(LIST[name].length/PER[name])))}
+function paint(name){
+ var n=pages(name);if(PAGE[name]>=n)PAGE[name]=0;
+ var s=PAGE[name]*PER[name],items=LIST[name].slice(s,s+PER[name]),h='',i;
+ for(i=0;i<items.length;i++)h+=RENDER[name](items[i]);
+ $(name).innerHTML=h||EMPTY[name];
+ var dd='';if(n>1){dd=(PAGE[name]+1)+' / '+n}
+ $('d-'+name).textContent=dd}
+function nav(name,dir){
+ var n=pages(name);if(n<2)return;
+ PAGE[name]=(PAGE[name]+dir+n)%n;
+ var el=$(name);el.className='fade out';
+ setTimeout(function(){paint(name);el.className='fade'},220)}
+function bindSwipe(name){
+ var el=$(name),sx=0,sy=0,drag=false;
+ el.addEventListener('pointerdown',function(e){sx=e.clientX;sy=e.clientY;drag=true});
+ el.addEventListener('pointerup',function(e){
+  if(!drag)return;drag=false;
+  var dx=e.clientX-sx,dy=e.clientY-sy;
+  if(Math.abs(dx)>60&&Math.abs(dx)>Math.abs(dy)*1.5){SUPPRESS=Date.now()+400;nav(name,dx<0?1:-1)}});
+ el.addEventListener('click',function(e){if(Date.now()<SUPPRESS){e.preventDefault();e.stopPropagation()}},true)}
+['news','kev','events','nvd','psirt'].forEach(function(n){
+ bindSwipe(n);
+ if(AUTO[n]>0)setInterval(function(){nav(n,1)},AUTO[n]*1000)});
+
+/* ---------- 상태 바 ---------- */
+function countTo(el,to){
+ to=+to||0;
+ var cur=el.getAttribute('data-v'),from=cur==null?0:+cur;
+ if(cur==String(to))return;
+ el.setAttribute('data-v',to);
+ var step=0,steps=16;clearInterval(el._t);
+ el._t=setInterval(function(){step++;el.textContent=Math.round(from+(to-from)*step/steps);if(step>=steps){clearInterval(el._t);el.textContent=to}},35)}
+function renderStatus(st){
+ st=st||{};
+ var lv={'안정':0,'주의':1,'경계':2}[st.level];if(lv==null)lv=0;
+ $('chip').className='chip lv'+lv;
+ $('chip').innerHTML='위협 수준<b>'+esc(st.level||'-')+'</b><small>자체 산정</small>';
+ countTo($('c1'),st.new2);countTo($('c2'),st.nvd);countTo($('c3'),st.ours7);
+ $('c3id').textContent=(st.ours7_ids||[]).join(', ')}
+
+/* ---------- 도넛 차트 (30일 공격 유형) ---------- */
+var TSIG='',COLS=['#EF4444','#F97316','#FACC15','#22D3EE','#64748B'];
+function renderDonut(st){
+ var sig=JSON.stringify(st&&st.types);
+ if(sig==TSIG)return;TSIG=sig;
+ var ty=(st&&st.types)||[],t=0,i;
+ for(i=0;i<ty.length;i++)t+=ty[i].n;
+ if(!t){$('donut').innerHTML='<div class="empty">데이터 없음</div>';return}
+ var C=2*Math.PI*40,cum=0,segs='',lg='';
+ for(i=0;i<ty.length;i++){
+  var len=C*ty[i].n/t,col=COLS[i%COLS.length];
+  segs+='<circle cx="52" cy="52" r="40" fill="none" stroke="'+col+'" stroke-width="14" transform="rotate(-90 52 52)" style="stroke-dasharray:0 '+C+';transition:stroke-dasharray 1s ease" stroke-dashoffset="'+(-cum)+'" data-d="'+len+' '+(C-len)+'"/>';
+  cum+=len;
+  lg+='<div class="lg"><i style="background:'+col+'"></i>'+esc(ty[i].name)+'<b>'+ty[i].n+'건</b></div>'}
+ $('donut').innerHTML='<div class="dn2"><div class="dnw"><svg width="132" height="132" viewBox="0 0 104 104"><circle cx="52" cy="52" r="40" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14"/>'+segs+'</svg><div class="dnc"><b>'+t+'</b><span>30일 합계</span></div></div><div class="lgs">'+lg+'</div></div>';
+ setTimeout(function(){
+  var cs=$('donut').getElementsByTagName('circle'),k;
+  for(k=0;k<cs.length;k++){var dd=cs[k].getAttribute('data-d');if(dd)cs[k].style.strokeDasharray=dd}
+ },80)}
+
+/* ---------- 하단 티커 ---------- */
+var TK_LAST='';
+function setTicker(html){
+ if(html==TK_LAST)return;TK_LAST=html;
+ var tk=$('tk');tk.style.animation='none';tk.innerHTML=html;
+ var uw=tk.offsetWidth||1,mw=$('tkmask').offsetWidth||900;
+ var n=Math.max(1,Math.ceil(mw/uw)),blk='',i;
+ for(i=0;i<n;i++)blk+=html;
+ tk.innerHTML=blk+blk;
+ var bw=tk.offsetWidth/2;
+ tk.style.animation='tkscroll '+Math.max(20,Math.round(bw/70))+'s linear infinite'}
+function buildTicker(d){
+ var u=[],nw=(d.news||[]).slice(0,8),kv=(d.kev||[]).slice(0,5),ts=todayStr(),i;
+ var ev=(d.events||[]).filter(function(e){return e.kind=='event'&&e.end>=ts}).slice(0,2);
+ for(i=0;i<nw.length;i++){
+  u.push('<span class="ti"><b class="tg2 tgN">뉴스</b>'+esc(nw[i].title)+'</span>');
+  if(kv[i])u.push('<span class="ti"><b class="tg2 tgC">CVE</b>'+esc(kv[i].cve)+' '+esc(kv[i].atk)+' · '+esc(kv[i].vendor)+' '+esc(kv[i].product)+'</span>')}
+ for(i=0;i<ev.length;i++)u.push('<span class="ti"><b class="tg2 tgE">행사</b>'+md(ev[i].date)+' '+esc(ev[i].title)+'</span>');
+ if(!u.length)u.push('<span class="ti">데이터를 불러오는 중입니다</span>');
+ setTicker(u.join(''))}
+
+function render(d){
+ renderWx(d.weather);
+ LIST.news=(d.news||[]).slice(0,12);
+ LIST.kev=(d.kev||[]).slice(0,8);
+ LIST.events=(d.events||[]).slice(0,12);
+ paint('news');paint('kev');paint('events');
+
+ LIST.nvd=(d.nvd||[]).slice(0,6);
+ LIST.psirt=(d.psirt||[]).slice(0,6);
+ paint('nvd');paint('psirt');
+
+ renderStatus(d.stats);
+ renderDonut(d.stats);
+ buildTicker(d);
+ tick()}
+
+function load(){
+ var x=new XMLHttpRequest();x.open('GET','data.json?'+Date.now(),true);
+ x.onload=function(){
+  try{DATA=JSON.parse(x.responseText);render(DATA)}
+  catch(e){if(window.console)console.error('render error',e)}};
+ x.send()}
+load();setInterval(load,60000);setInterval(tick,1000);tick();
+setTimeout(function(){location.reload()},6*3600*1000); /* 6시간마다 전체 새로고침 (TV 브라우저 멈춤 방지) */
+</script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    main()
