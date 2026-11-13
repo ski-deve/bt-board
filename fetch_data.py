@@ -989,7 +989,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
           <polygon points="9.9,28 48,6 48,32 32.4,41" fill="url(#lgG3)"/>
           <polygon points="48,32 63.6,41 63.6,59 48,68 32.4,59 32.4,41" fill="#E6E6E6"/>
         </g>
-        <text x="106" y="58" font-family="'Malgun Gothic','Noto Sans KR',sans-serif" font-size="29" font-weight="900" fill="#FFFFFF">(주)비테크놀로지</text>
+        <text x="106" y="58" font-family="'Malgun Gothic','Noto Sans KR',sans-serif" font-size="20" font-weight="900" fill="#FFFFFF">(주)비테크놀로지</text>
         <text x="108" y="83" font-family="Arial,'Noto Sans KR',sans-serif" font-size="17" font-weight="700" letter-spacing="1.6" fill="#9FB4CE">BEE TECHNOLOGY</text>
       </svg>
       <div style="margin-left:22px"><b style="font-size:40px">오늘의 보안 브리핑</div>
