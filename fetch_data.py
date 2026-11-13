@@ -382,3 +382,323 @@ def find_dates(text):
             out.append(dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
         except ValueError:
             pass
+    return out
+
+
+def event_type(title, given=""):
+    if given:
+        return given
+    for label, keys in EVENT_TYPES:
+        if any(k in title for k in keys):
+            return label
+    return "행사"
+
+
+def passes(title, need_event):
+    low = title.lower()
+    if not any(k in low for k in SEC_KW):
+        return False
+    if any(w in title for w in EXCLUDE_WORDS) or any(w in title for w in PAST_WORDS):
+        return False
+    if need_event and not (any(w in title for w in EVENT_WORDS) or any(w in title for w in ACTION_WORDS)):
+        return False
+    return True
+
+
+def load_registered_events():
+    today = dt.datetime.now(KST).date()
+    out = []
+    if not EVENTS_FILE.exists():
+        return out
+    try:
+        arr = json.loads(EVENTS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print("[경고] events.json 형식 오류:", e)
+        return out
+    for e in arr:
+        try:
+            s = dt.date.fromisoformat(str(e["date"]))
+            en = dt.date.fromisoformat(str(e.get("end") or e["date"]))
+        except Exception as e2:
+            print("[경고] events.json 날짜 형식 오류:", e2)
+            continue
+        if en < today:
+            continue
+        title = e.get("title", "")
+        out.append({"kind": "event", "src": "등록", "type": event_type(title, e.get("type", "")),
+                    "date": s.isoformat(), "end": en.isoformat(), "time": e.get("time", ""),
+                    "title": title, "place": e.get("place", ""), "link": e.get("link", "")})
+    out.sort(key=lambda x: (x["date"], x["title"]))
+    return out[:10]
+
+
+def scrape_site(site):
+    page = decode_html(http_get(site["url"], 30))
+    today = dt.datetime.now(KST).date()
+    out, seen = [], set()
+    for m in re.finditer(r"<a\b([^>]*)>(.*?)</a>", page, re.S | re.I):
+        attrs, inner = m.group(1), m.group(2)
+        if site["require_param"] not in html.unescape(attrs):
+            continue
+        title = clean(inner)
+        if len(title) < 6 or not passes(title, site.get("need_event", True)):
+            continue
+        key = re.sub(r"\W", "", title)[:30]
+        if key in seen:
+            continue
+        seen.add(key)
+        hm = re.search(r"href\s*=\s*[\"']([^\"']+)[\"']", attrs, re.I)
+        href = html.unescape(hm.group(1)).strip() if hm else ""
+        if not href or href.lower().startswith("javascript") or href.startswith("#"):
+            link = site["url"]
+        else:
+            link = urllib.parse.urljoin(site["url"], href)
+            if not link.startswith(site["domain"]):
+                link = site["url"]
+        ds = find_dates(clean(page[m.end(): m.end() + 400]))
+        posted = ds[0] if ds else None
+        if posted and (today - posted).days > 60:
+            continue
+        ts = int(dt.datetime.combine(posted, dt.time(12), KST).timestamp()) if posted else 0
+        out.append({"kind": "site", "src": site.get("label", site["name"]), "type": event_type(title),
+                    "title": title, "link": link, "ts": ts, "posted": posted.isoformat() if posted else ""})
+    return out
+
+
+def fetch_bexco():
+    page = decode_html(http_get(BEXCO_URL, 30))
+    today = dt.datetime.now(KST).date()
+    out, seen = [], set()
+    for blk in re.findall(r"<(?:li|tr)\b.*?</(?:li|tr)>", page, re.S | re.I):
+        text = clean(blk)
+        ds = find_dates(text)
+        if not ds:
+            continue
+        s = ds[0]
+        e = ds[1] if len(ds) > 1 else ds[0]
+        if e < s:
+            e = s
+        if e < today:
+            continue
+        dm = DATE_RE.search(text)
+        head = text[:dm.start()].strip()
+        tail = DATE_RE.sub("", text[dm.end():], count=1).replace("~", " ").strip()
+        head = re.sub(r"^(?:상세보기|진행중|D-\d+|D-day|이벤트|회의|전시|공연|컨벤션|\s)+", "", head).strip()
+        for cat in (" 회의 ", " 이벤트 ", " 전시 ", " 공연 "):
+            if cat in head:
+                a, b = [p.strip() for p in head.split(cat, 1)]
+                if a and b and (a == b or a in b or b in a):
+                    head = b if len(b) >= len(a) else a
+                break
+        if len(head) < 4 or not any(k in head.lower() for k in SEC_KW):
+            continue
+        if any(w in head for w in EXCLUDE_WORDS):
+            continue
+        key = re.sub(r"\W", "", head)[:30] + s.isoformat()
+        if key in seen:
+            continue
+        seen.add(key)
+        hm = re.search(r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"']", blk, re.I)
+        href = html.unescape(hm.group(1)).strip() if hm else ""
+        link = BEXCO_URL if (not href or href.lower().startswith("javascript") or href.startswith("#")) \
+            else urllib.parse.urljoin(BEXCO_URL, href)
+        out.append({"kind": "event", "src": "벡스코", "type": event_type(head), "date": s.isoformat(),
+                    "end": e.isoformat(), "time": "", "title": head, "place": "벡스코 " + tail[:30].strip(),
+                    "link": link})
+    out.sort(key=lambda x: (x["date"], x["title"]))
+    return out[:6]
+
+
+def fetch_event_search():
+    found, seen = [], set()
+    cutoff = time.time() - 21 * 86400
+    for url in EVENT_SEARCH:
+        try:
+            items = parse_rss(url, "검색")
+        except Exception as e:
+            print("[실패] 행사 검색", e)
+            continue
+        for it in items:
+            t = strip_source(it["title"])
+            if it["ts"] < cutoff or not passes(t, True):
+                continue
+            key = re.sub(r"\W", "", t)[:30]
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append({"kind": "search", "type": event_type(t), "title": t,
+                          "link": it["link"], "ts": it["ts"]})
+    found.sort(key=lambda x: x["ts"], reverse=True)
+    return found[:4]
+
+
+def fetch_events():
+    reg = load_registered_events()
+    fails, tried = 0, 0
+
+    bex = []
+    tried += 1
+    try:
+        bex = fetch_bexco()
+        print("[수집] 벡스코", len(bex), "건")
+    except Exception as e:
+        fails += 1
+        print("[실패] 벡스코", e)
+
+    sites, seen = [], set()
+    for site in TARGET_SITES:
+        tried += 1
+        try:
+            got = scrape_site(site)
+            print("[수집]", site["name"], len(got), "건")
+        except Exception as e:
+            fails += 1
+            print("[실패]", site["name"], e)
+            continue
+        for g in got:
+            key = re.sub(r"\W", "", g["title"])[:30]
+            if key not in seen:
+                seen.add(key)
+                sites.append(g)
+    sites.sort(key=lambda x: x["ts"], reverse=True)
+
+    srch = []
+    if USE_NEWS_SEARCH:
+        try:
+            srch = fetch_event_search()
+        except Exception as e:
+            print("[실패] 행사 검색", e)
+
+    allv = reg + bex + sites[:12] + srch
+    print("행사 합계: 등록", len(reg), "/ 벡스코", len(bex), "/ 기관 게시판", len(sites), "/ 검색", len(srch),
+          "/ 수집 실패", fails, "of", tried)
+    if not allv and fails > 0:
+        raise RuntimeError("행사 수집 실패 (이전 데이터 유지)")
+    return allv[:20]
+
+
+def fetch_weather():
+    q = urllib.parse.urlencode({
+        "latitude": BUSAN[0], "longitude": BUSAN[1],
+        "current": "temperature_2m,weather_code",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "timezone": "Asia/Seoul", "forecast_days": 7,
+    })
+    d = json.loads(http_get("https://api.open-meteo.com/v1/forecast?" + q).decode("utf-8"))
+    dd = d["daily"]
+    days = []
+    for i, t in enumerate(dd["time"]):
+        days.append({
+            "date": t, "code": dd["weather_code"][i],
+            "max": round(dd["temperature_2m_max"][i]), "min": round(dd["temperature_2m_min"][i]),
+            "pop": dd["precipitation_probability_max"][i],
+        })
+    return {"temp": round(d["current"]["temperature_2m"]), "code": d["current"]["weather_code"], "days": days}
+
+
+def build_stats(psirt, prev_nvd=0):
+    kev = _KEV_CACHE
+    if not kev:
+        raise RuntimeError("KEV 데이터 없음")
+    anchor = dt.datetime.now(dt.timezone.utc).date()
+    s30 = (anchor - dt.timedelta(days=29)).isoformat()
+    s7 = (anchor - dt.timedelta(days=6)).isoformat()
+    s1 = (anchor - dt.timedelta(days=1)).isoformat()
+
+    types, total30, new2, ours7_ids = {}, 0, 0, []
+    vulns = sorted(kev.get("vulnerabilities", []), key=lambda v: v.get("dateAdded", ""), reverse=True)
+    for v in vulns:
+        a = v.get("dateAdded", "")
+        if a < s30:
+            break
+        if a >= s1:
+            new2 += 1
+        lab = classify(v.get("vulnerabilityName", ""), v.get("shortDescription", ""))[0]
+        if lab == DEFAULT_ATK[0]:
+            lab = "기타"
+        types[lab] = types.get(lab, 0) + 1
+        total30 += 1
+        ours = any(k in v.get("vendorProject", "").lower() for k in OUR_VENDORS)
+        if ours and a >= s7:
+            ours7_ids.append(v.get("cveID", ""))
+
+    now = time.time()
+    psirt_hi = any(p.get("sev") in ("치명", "높음") and now - p.get("ts", 0) <= 86400 for p in (psirt or []))
+    nvd = _NVD_TOTAL if _NVD_TOTAL is not None else prev_nvd
+    score = min(new2, 8) + 3 * min(len(ours7_ids), 2) + (2 if nvd >= 5 else 0) + (3 if psirt_hi else 0)
+    level = "경계" if score >= THREAT_HIGH else ("주의" if score >= THREAT_MID else "안정")
+
+    items = sorted([(k, n) for k, n in types.items() if k != "기타"], key=lambda x: -x[1])
+    top = items[:4]
+    rest = sum(n for _, n in items[4:]) + types.get("기타", 0)
+    if rest:
+        top.append(("기타", rest))
+    return {
+        "types": [{"name": k, "n": n} for k, n in top],
+        "total30": total30, "new2": new2, "ours7": len(ours7_ids), "ours7_ids": ours7_ids[:3],
+        "nvd": nvd, "score": score, "level": level,
+    }
+
+
+def load_prev():
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if "/" not in repo:
+        return {}
+    owner, name = repo.split("/", 1)
+    try:
+        url = "https://%s.github.io/%s/data.json?%d" % (owner, name, int(time.time()))
+        return json.loads(http_get(url, 15).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def main():
+    prev = load_prev()
+    data = {"generated": int(time.time()), "errors": []}
+    jobs = (("news", fetch_news, []), ("kev", fetch_kev, []), ("nvd", fetch_nvd, []),
+            ("psirt", fetch_psirt, []), ("events", fetch_events, []), ("weather", fetch_weather, {}))
+    for key, fn, empty in jobs:
+        try:
+            data[key] = fn()
+            print("[성공]", key)
+        except Exception as e:
+            print("[실패]", key, e)
+            data["errors"].append(key)
+            data[key] = prev.get(key, empty)
+    try:
+        data["stats"] = build_stats(data.get("psirt", []), (prev.get("stats") or {}).get("nvd", 0))
+        print("[성공] stats 위협수준:", data["stats"]["level"], "점수:", data["stats"]["score"])
+    except Exception as e:
+        print("[실패] stats", e)
+        data["errors"].append("stats")
+        data["stats"] = prev.get("stats", {})
+    
+    # 📌 site 폴더가 반드시 생성되도록 보장 (GitHub Actions 배포 오류 방지)
+    OUT.mkdir(exist_ok=True)
+    (OUT / "data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    (OUT / "index.html").write_text(INDEX_HTML.replace("__AUTO__", json.dumps(AUTO)), encoding="utf-8")
+    (OUT / ".nojekyll").write_text("", encoding="utf-8")
+    print("완료:", len(data["news"]), "news,", len(data["kev"]), "kev,", len(data["events"]), "events")
+
+
+# ----------------------------- 화면 (TV 브라우저 호환을 위해 단순 문법 사용) -----------------------------
+INDEX_HTML = r"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BEE TECHNOLOGY 보안 전광판</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
+#board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
+ background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
+ padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 180px 180px 1fr 52px 28px;row-gap:10px}
+.panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:16px 22px;overflow:hidden;position:relative}
+.hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1;min-width:0}
+.ttl small{font-size:18px;font-weight:500;color:#7C93B2;margin-left:10px}
+.pg{display:flex;align-items:center;flex:none;margin-left:10px}
+.pb{width:44px;height:38px;border:0;border-radius:10px;background:rgba(34,211,238,.15);color:#22D3EE;font-size:28px;font-weight:900;line-height:36px;cursor:pointer;margin-left:6px}
+.pb:hover,.pb:focus{outline:2px solid #22D3EE;outline-offset:1px}
+.pd{display:inline-block;margin:0 6px;min-width
