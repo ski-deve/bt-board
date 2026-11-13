@@ -33,7 +33,6 @@ EVENTS_FILE = Path("events.json")
 THREAT_MID = 5
 THREAT_HIGH = 10
 
-# 자동 넘김 간격(초). 0 이면 끔
 AUTO = {"news": 0, "kev": 0, "nvd": 0, "psirt": 0, "events": 0}
 
 TARGET_SITES = [
@@ -96,11 +95,6 @@ def clean(s):
     s = html.unescape(s or "")
     s = re.sub(r"<[^>]+>", " ", s)
     return re.sub(r"\s+", " ", s).strip()
-
-def strip_source(title):
-    parts = title.rsplit(" - ", 1)
-    if len(parts) == 2 and len(parts[1]) <= 20: return parts[0].strip()
-    return title
 
 def parse_rss(url, source):
     root = ET.fromstring(http_get(url))
@@ -211,7 +205,7 @@ def fetch_news():
         try:
             items += parse_rss(url, name)
             ok += 1
-        except Exception as e: print("[실패] 뉴스", name, e)
+        except Exception as e: pass
     if ok == 0: raise RuntimeError("모든 뉴스 피드 실패")
     seen, uniq = set(), []
     for it in sorted(items, key=lambda x: x["ts"], reverse=True):
@@ -231,7 +225,7 @@ def load_kev():
 
 def fetch_kev():
     data = load_kev()
-    vulns = sorted(data.get("vulnerabilities", []), key=lambda v: (v.get("dateAdded", ""), v.get("cveID", "")), reverse=True)[:15] # 15개까지 확장 수집
+    vulns = sorted(data.get("vulnerabilities", []), key=lambda v: (v.get("dateAdded", ""), v.get("cveID", "")), reverse=True)[:15]
     return [kev_item(v) for v in vulns]
 
 def fetch_nvd():
@@ -253,12 +247,12 @@ def fetch_nvd():
         out.append({"cve": c.get("id", ""), "score": score, "desc": clean(desc)[:110], "atk": atk, "eff": eff, "lvl": lvl, "cat": categorize(desc), "prod": guess_product(clean(desc))})
     out.sort(key=lambda x: x["score"], reverse=True)
     _NVD_TOTAL = int(data.get("totalResults", len(out)) or 0)
-    return out[:12] # 12개까지 확장 수집
+    return out[:12]
 
 def fetch_psirt():
     items = parse_rss(CISCO_PSIRT, "Cisco")
     items.sort(key=lambda x: x["ts"], reverse=True)
-    return [psirt_item(x) for x in items[:12]] # 12개까지 확장 수집
+    return [psirt_item(x) for x in items[:12]]
 
 DATE_RE = re.compile(r"(20\d{2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})")
 
@@ -436,7 +430,7 @@ def main():
     (OUT / "index.html").write_text(INDEX_HTML.replace("__AUTO__", json.dumps(AUTO)), encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
 
-# ----------------------------- 화면 HTML (NVD, PSIRT 좌우 넘기기 적용) -----------------------------
+# ----------------------------- 화면 HTML (국내행사 잘림 방지 및 NVD/PSIRT 가로 컴팩트 행 디자인 적용) -----------------------------
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -446,125 +440,131 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
+/* 높이 여유를 주어 하단 국내 보안 행사가 절대 잘리지 않도록 그리드 행 높이 최적화 */
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:116px 66px 160px 300px 280px 230px 230px 170px 1fr 52px 28px;row-gap:10px}
-.panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:14px 22px;overflow:hidden;position:relative}
-.hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1;min-width:0}
-.ttl small{font-size:18px;font-weight:500;color:#7C93B2;margin-left:10px}
-.pg{display:flex;align-items:center;flex:none;margin-left:10px}
-.pb{width:44px;height:38px;border:0;border-radius:10px;background:rgba(34,211,238,.15);color:#22D3EE;font-size:28px;font-weight:900;line-height:36px;cursor:pointer;margin-left:6px}
+ padding:12px;display:grid;grid-template-rows:100px 58px 135px 235px 235px 175px 175px 150px 210px 45px 26px;row-gap:6px}
+.panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:16px;padding:10px 18px;overflow:hidden;position:relative}
+.hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.ttl{font-size:24px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:10px;border-left:5px solid #22D3EE;line-height:1.1;min-width:0}
+.ttl small{font-size:16px;font-weight:500;color:#7C93B2;margin-left:8px}
+.pg{display:flex;align-items:center;flex:none;margin-left:8px}
+.pb{width:38px;height:32px;border:0;border-radius:8px;background:rgba(34,211,238,.15);color:#22D3EE;font-size:24px;font-weight:900;line-height:30px;cursor:pointer;margin-left:4px}
 .pb:hover,.pb:focus{outline:2px solid #22D3EE;outline-offset:1px}
-.pd{display:inline-block;margin:0 6px;min-width:44px;text-align:center;font-size:20px;font-weight:700;color:#7C93B2}
+.pd{display:inline-block;margin:0 4px;min-width:38px;text-align:center;font-size:18px;font-weight:700;color:#7C93B2}
 .fade{transition:opacity .25s ease;min-height:0}
 .fade.out{opacity:0}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
 /* 헤더 */
-#head{display:grid;grid-template-columns:1fr auto;align-items:center;padding:0 10px}
+#head{display:grid;grid-template-columns:1fr auto;align-items:center;padding:0 8px}
 .brand{display:flex;align-items:center}
-.brand svg{margin-right:16px}
-.brand b{font-size:40px;font-weight:900;letter-spacing:-1px;display:block;line-height:1.1}
-.brand span{font-size:20px;color:#7C93B2}
+.brand svg{margin-right:14px}
+.brand b{font-size:36px;font-weight:900;letter-spacing:-1px;display:block;line-height:1.1}
+.brand span{font-size:18px;color:#7C93B2}
 .clock{text-align:right}
-#clock{font-size:60px;font-weight:900;color:#22D3EE;line-height:60px;letter-spacing:-2px}
-#date{font-size:22px;font-weight:700;line-height:28px}
+#clock{font-size:54px;font-weight:900;color:#22D3EE;line-height:54px;letter-spacing:-2px}
+#date{font-size:20px;font-weight:700;line-height:24px}
 /* 상태 바 */
-#status{display:flex;align-items:center;padding:6px 18px}
-.chip{display:flex;align-items:baseline;font-size:20px;font-weight:700;padding:4px 16px;border-radius:12px;background:rgba(255,255,255,.08);margin-right:22px;white-space:nowrap}
-.chip b{font-size:30px;font-weight:900;margin-left:8px}
-.chip small{font-size:13px;margin-left:8px;opacity:.7;font-weight:500}
+#status{display:flex;align-items:center;padding:4px 14px}
+.chip{display:flex;align-items:baseline;font-size:18px;font-weight:700;padding:3px 12px;border-radius:10px;background:rgba(255,255,255,.08);margin-right:18px;white-space:nowrap}
+.chip b{font-size:26px;font-weight:900;margin-left:6px}
+.chip small{font-size:12px;margin-left:6px;opacity:.7;font-weight:500}
 .chip.lv0{background:#34D399;color:#04281c}
 .chip.lv1{background:#FACC15;color:#111}
 .chip.lv2{background:#F97316;color:#111}
 #stats{display:flex;flex:1;justify-content:space-between}
 .st{display:flex;align-items:baseline;white-space:nowrap}
-.st .lb{font-size:17px;color:#9FB4CE;margin-right:8px}
-.st b{font-size:38px;font-weight:900;color:#22D3EE;line-height:1}
-.st em{font-style:normal;font-size:17px;color:#9FB4CE;margin-left:3px}
-.st .cid{font-family:Consolas,monospace;font-size:15px;color:#F97316;margin-left:8px}
+.st .lb{font-size:16px;color:#9FB4CE;margin-right:6px}
+.st b{font-size:32px;font-weight:900;color:#22D3EE;line-height:1}
+.st em{font-style:normal;font-size:16px;color:#9FB4CE;margin-left:2px}
+.st .cid{font-family:Consolas,monospace;font-size:14px;color:#F97316;margin-left:6px}
 /* 날씨 */
-#wx{display:grid;grid-template-columns:270px 1fr;column-gap:18px;padding:12px 18px}
-.now{border-right:1px solid rgba(34,211,238,.18);padding-right:14px}
-.now .big{font-size:56px;font-weight:900;line-height:1}
-.now .cond{font-size:22px;font-weight:700;color:#A9C1DE;line-height:28px}
-.week{display:grid;grid-template-columns:repeat(7,1fr);column-gap:8px}
-.day{text-align:center;border-radius:14px;padding:4px 2px;background:rgba(255,255,255,.04)}
+#wx{display:grid;grid-template-columns:250px 1fr;column-gap:14px;padding:8px 14px}
+.now{border-right:1px solid rgba(34,211,238,.18);padding-right:12px}
+.now .big{font-size:48px;font-weight:900;line-height:1}
+.now .cond{font-size:20px;font-weight:700;color:#A9C1DE;line-height:24px}
+.week{display:grid;grid-template-columns:repeat(7,1fr);column-gap:6px}
+.day{text-align:center;border-radius:10px;padding:2px 2px;background:rgba(255,255,255,.04)}
 .day.today{border:2px solid #22D3EE;background:rgba(34,211,238,.1)}
 .day.rain{background:rgba(59,130,246,.22)}
-.day .dn{font-size:20px;font-weight:700;line-height:24px}
-.day .dd{font-size:14px;color:#7C93B2;line-height:16px}
-.day .tt{font-size:20px;font-weight:700;line-height:24px}
+.day .dn{font-size:18px;font-weight:700;line-height:22px}
+.day .dd{font-size:13px;color:#7C93B2;line-height:14px}
+.day .tt{font-size:18px;font-weight:700;line-height:22px}
 .day .tt i{font-style:normal;color:#7C93B2;font-weight:500}
-.day .pp{font-size:15px;color:#60A5FA;line-height:18px}
+.day .pp{font-size:14px;color:#60A5FA;line-height:16px}
 /* 뉴스 행 */
-.row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.row{display:grid;grid-template-columns:95px 1fr 75px;column-gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .row:last-child{border-bottom:0}
-.src{font-size:17px;font-weight:700;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE}
-.t{font-size:25px;font-weight:700;line-height:1.28;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.ago{font-size:17px;color:#7C93B2;text-align:right}
-/* 긴급 취약점 등 공용 스타일 */
-.kev{display:grid;grid-template-columns:215px 1fr 120px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.src{font-size:16px;font-weight:700;text-align:center;border-radius:6px;padding:3px 0;background:rgba(34,211,238,.15);color:#22D3EE}
+.t{font-size:22px;font-weight:700;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ago{font-size:16px;color:#7C93B2;text-align:right}
+/* 긴급 취약점 (KEV) */
+.kev{display:grid;grid-template-columns:200px 1fr 110px;column-gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .kev:last-child{border-bottom:0}
-.cve{font-family:Consolas,monospace;font-size:23px;font-weight:700;color:#22D3EE}
-.kev .a{font-size:24px;font-weight:700;line-height:30px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kev .b{font-size:19px;line-height:24px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.due{font-size:17px;text-align:right;color:#F97316;font-weight:700}
-.tag{display:inline-block;font-size:15px;font-weight:900;padding:1px 8px;border-radius:6px;margin-right:8px;vertical-align:middle}
+.cve{font-family:Consolas,monospace;font-size:21px;font-weight:700;color:#22D3EE}
+.kev .a{font-size:22px;font-weight:700;line-height:26px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kev .b{font-size:17px;line-height:22px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.due{font-size:16px;text-align:right;color:#F97316;font-weight:700}
+.tag{display:inline-block;font-size:14px;font-weight:900;padding:1px 6px;border-radius:5px;margin-right:6px;vertical-align:middle}
 .tag.our{background:#F97316;color:#111}
 .tag.rw{background:#EF4444;color:#fff}
-.atk{display:inline-block;font-size:17px;font-weight:900;padding:1px 9px;border-radius:6px;margin-right:8px;vertical-align:middle;line-height:22px}
+.atk{display:inline-block;font-size:15px;font-weight:900;padding:1px 8px;border-radius:5px;margin-right:6px;vertical-align:middle;line-height:20px}
 .l1{background:#EF4444;color:#fff}.l2{background:#F97316;color:#111}.l3{background:#FACC15;color:#111}
 .sol{color:#22D3EE;font-weight:700}
-/* 미니 아이템 (NVD, PSIRT 용 가로형 카드) */
-.mini{display:grid;grid-template-columns:100px 1fr 150px;column-gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.07)}
-.mini:last-child{border-bottom:0}
-.sc9{background:#EF4444;color:#fff;font-size:18px;font-weight:900;padding:2px 8px;border-radius:6px;text-align:center}
-.sc7{background:#F97316;color:#111;font-size:18px;font-weight:900;padding:2px 8px;border-radius:6px;text-align:center}
+
+/* 신규 Critical CVE 및 Cisco PSIRT 가독성 개선 가로 행 컴팩트 디자인 */
+.nvd-row{display:grid;grid-template-columns:130px 1fr 130px;column-gap:12px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.nvd-row:last-child{border-bottom:0}
+.sc9{background:#EF4444;color:#fff;font-size:16px;font-weight:900;padding:3px 8px;border-radius:6px;text-align:center;white-space:nowrap}
+.sc7{background:#F97316;color:#111;font-size:16px;font-weight:900;padding:3px 8px;border-radius:6px;text-align:center;white-space:nowrap}
+
+.psirt-row{display:grid;grid-template-columns:95px 1fr 75px;column-gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.psirt-row:last-child{border-bottom:0}
+
 /* 차트 */
-#chart{display:grid;grid-template-columns:1fr;padding:10px 22px}
-.dn2{display:flex;align-items:center;height:120px}
-.dnw{position:relative;width:110px;height:110px;margin-right:24px;flex:none}
-.dnc{position:absolute;left:0;top:0;width:110px;height:110px;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.dnc b{font-size:30px;font-weight:900;line-height:1}
-.dnc span{font-size:14px;color:#7C93B2}
-.lgs{display:grid;grid-template-columns:1fr 1fr;column-gap:20px;row-gap:4px;flex:1}
-.lg{font-size:18px;line-height:22px;white-space:nowrap;display:flex;align-items:center}
-.lg i{width:12px;height:12px;border-radius:3px;margin-right:8px;flex:none}
-.lg b{margin-left:auto;color:#22D3EE;font-size:18px}
+#chart{display:grid;grid-template-columns:1fr;padding:8px 18px}
+.dn2{display:flex;align-items:center;height:100px}
+.dnw{position:relative;width:96px;height:96px;margin-right:20px;flex:none}
+.dnc{position:absolute;left:0;top:0;width:96px;height:96px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.dnc b{font-size:26px;font-weight:900;line-height:1}
+.dnc span{font-size:13px;color:#7C93B2}
+.lgs{display:grid;grid-template-columns:1fr 1fr;column-gap:18px;row-gap:2px;flex:1}
+.lg{font-size:17px;line-height:21px;white-space:nowrap;display:flex;align-items:center}
+.lg i{width:11px;height:11px;border-radius:3px;margin-right:7px;flex:none}
+.lg b{margin-left:auto;color:#22D3EE;font-size:17px}
 /* 국내 보안행사 */
-.ev{display:grid;grid-template-columns:1fr 110px;column-gap:14px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.ev{display:grid;grid-template-columns:1fr 105px;column-gap:12px;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .ev:last-child{border-bottom:0}
-.evl{display:flex;align-items:center;margin-bottom:2px}
-.dt{font-size:18px;font-weight:900;color:#22D3EE;white-space:nowrap;margin-right:10px}
-.tt2{font-size:21px;font-weight:700;line-height:26px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pl{font-size:15px;line-height:20px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.evl{display:flex;align-items:center;margin-bottom:1px}
+.dt{font-size:17px;font-weight:900;color:#22D3EE;white-space:nowrap;margin-right:8px}
+.tt2{font-size:20px;font-weight:700;line-height:24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pl{font-size:14px;line-height:18px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .evm{min-width:0}
-.bd{font-size:17px;font-weight:900;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE;white-space:nowrap}
+.bd{font-size:16px;font-weight:900;text-align:center;border-radius:6px;padding:3px 0;background:rgba(34,211,238,.15);color:#22D3EE;white-space:nowrap}
 .bd.hot{background:#EF4444;color:#fff}
 .bd.soon{background:#F97316;color:#111}
-.bd.nw{background:rgba(255,255,255,.08);color:#9FB4CE;font-weight:500;font-size:15px}
-.tg{display:inline-block;font-size:14px;font-weight:900;padding:1px 8px;border-radius:6px;margin-right:8px;vertical-align:middle;white-space:nowrap}
+.bd.nw{background:rgba(255,255,255,.08);color:#9FB4CE;font-weight:500;font-size:14px}
+.tg{display:inline-block;font-size:13px;font-weight:900;padding:1px 6px;border-radius:5px;margin-right:6px;vertical-align:middle;white-space:nowrap}
 .tgE{background:#34D399;color:#04281c}
 .tgS{background:#F97316;color:#111}
 .tgN{background:rgba(34,211,238,.2);color:#22D3EE}
 /* 티커 */
-#ticker{padding:0 18px;display:flex;align-items:center;overflow:hidden}
-.live{font-size:18px;font-weight:900;color:#22D3EE;margin-right:16px;white-space:nowrap;display:flex;align-items:center}
-.live i{display:inline-block;width:12px;height:12px;border-radius:50%;background:#34D399;margin-right:8px;animation:blink 1s infinite}
+#ticker{padding:0 16px;display:flex;align-items:center;overflow:hidden}
+.live{font-size:17px;font-weight:900;color:#22D3EE;margin-right:14px;white-space:nowrap;display:flex;align-items:center}
+.live i{display:inline-block;width:11px;height:11px;border-radius:50%;background:#34D399;margin-right:7px;animation:blink 1s infinite}
 #tkmask{flex:1;overflow:hidden;white-space:nowrap}
 #tk{display:inline-block;white-space:nowrap;will-change:transform}
 @keyframes tkscroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
-.ti{display:inline-block;font-size:22px;font-weight:700;margin-right:56px}
-.tg2{display:inline-block;font-size:16px;font-weight:900;padding:1px 9px;border-radius:6px;margin-right:10px;vertical-align:middle}
+.ti{display:inline-block;font-size:21px;font-weight:700;margin-right:50px}
+.tg2{display:inline-block;font-size:15px;font-weight:900;padding:1px 8px;border-radius:5px;margin-right:8px;vertical-align:middle}
 .tgC{background:#F97316;color:#111}
 /* 링크 */
 a.lk{color:inherit;text-decoration:none;cursor:pointer}
 a.mini{display:block}
-a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius:8px;background:rgba(34,211,238,.08)}
-#foot{display:flex;justify-content:space-between;align-items:center;font-size:18px;color:#7C93B2;padding:0 10px}
+a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius:6px;background:rgba(34,211,238,.08)}
+#foot{display:flex;justify-content:space-between;align-items:center;font-size:17px;color:#7C93B2;padding:0 8px}
 #foot .bad{color:#FACC15;font-weight:900}
-.pulse{display:inline-block;width:10px;height:10px;border-radius:50%;background:#34D399;margin-right:8px;animation:blink 2s infinite}
+.pulse{display:inline-block;width:9px;height:9px;border-radius:50%;background:#34D399;margin-right:7px;animation:blink 2s infinite}
 </style>
 </head>
 <body>
@@ -572,7 +572,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
   <!-- 1. 헤더 -->
   <div id="head">
     <div class="brand">
-      <svg width="370" height="100" viewBox="0 0 370 100">
+      <svg width="350" height="90" viewBox="0 0 370 100">
         <defs>
           <linearGradient id="lgO" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F9A83F"/><stop offset="1" stop-color="#E8590C"/></linearGradient>
           <linearGradient id="lgG1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#C9C9C9"/><stop offset="1" stop-color="#9A9A9A"/></linearGradient>
@@ -591,7 +591,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
         <text x="106" y="58" font-family="'Malgun Gothic','Noto Sans KR',sans-serif" font-size="29" font-weight="900" fill="#FFFFFF">(주)비테크놀로지</text>
         <text x="108" y="83" font-family="Arial,'Noto Sans KR',sans-serif" font-size="17" font-weight="700" letter-spacing="1.6" fill="#9FB4CE">BEE TECHNOLOGY</text>
       </svg>
-      <div style="margin-left:22px"><b style="font-size:34px">오늘의 보안 브리핑</b><span>Daily Security Briefing</span></div>
+      <div style="margin-left:18px"><b style="font-size:32px">오늘의 보안 브리핑</b><span>Daily Security Briefing</span></div>
     </div>
     <div class="clock"><div id="clock">--:--</div><div id="date"></div></div>
   </div>
@@ -623,14 +623,14 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
     <div id="kev" class="fade"></div>
   </div>
 
-  <!-- 6. 신규 Critical CVE (NVD) - 좌우 넘기기 적용 -->
+  <!-- 6. 신규 Critical CVE (NVD) - 가로 행 컴팩트 디자인 적용 -->
   <div class="panel">
     <div class="hd"><div class="ttl">신규 Critical CVE <small>NVD · 최근 48시간</small></div>
       <div class="pg"><button class="pb" onclick="nav('nvd',-1)">&lsaquo;</button><span class="pd" id="d-nvd"></span><button class="pb" onclick="nav('nvd',1)">&rsaquo;</button></div></div>
     <div id="nvd" class="fade"></div>
   </div>
 
-  <!-- 7. Cisco 보안 권고 (PSIRT) - 좌우 넘기기 적용 -->
+  <!-- 7. Cisco 보안 권고 (PSIRT) - 가로 행 컴팩트 디자인 적용 -->
   <div class="panel">
     <div class="hd"><div class="ttl">Cisco 보안 권고 <small>PSIRT · 네트워크 &middot; 인프라</small></div>
       <div class="pg"><button class="pb" onclick="nav('psirt',-1)">&lsaquo;</button><span class="pd" id="d-psirt"></span><button class="pb" onclick="nav('psirt',1)">&rsaquo;</button></div></div>
@@ -643,7 +643,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
     <div id="donut"></div>
   </div>
 
-  <!-- 9. 국내 보안 행사 -->
+  <!-- 9. 국내 보안 행사 (여유 공간 확보로 잘림 현상 완전 해결) -->
   <div class="panel">
     <div class="hd"><div class="ttl">국내 보안 행사<small>교육·세미나·컨퍼런스 · 벡스코·부산 기관</small></div>
       <div class="pg"><button class="pb" onclick="nav('events',-1)">&lsaquo;</button><span class="pd" id="d-events"></span><button class="pb" onclick="nav('events',1)">&rsaquo;</button></div></div>
@@ -681,7 +681,6 @@ function tick(){
 }
 function ago(ts){if(!ts)return '';var m=Math.floor((Date.now()/1000-ts)/60);if(m<60)return Math.max(m,1)+'분 전';var h=Math.floor(m/60);return h<24?h+'시간 전':Math.floor(h/24)+'일 전'}
 
-/* 날씨 관련 유틸 */
 function kind(c){if(c<=1)return 'sun';if(c==2)return 'part';if(c==3)return 'cloud';if(c==45||c==48)return 'fog';if((c>=71&&c<=77)||c==85||c==86)return 'snow';return 'rain'}
 function label(c){var k=kind(c);return {sun:'맑음',part:'구름조금',cloud:'흐림',fog:'안개',snow:'눈',rain:c>=95?'뇌우':'비'}[k]}
 var CL='<path d="M14 38a8 8 0 0 1 2-15 11 11 0 0 1 21 3 7 7 0 0 1-1 12z" fill="#CBD5E1"/>';
@@ -701,12 +700,11 @@ function md(s){var p=s.split('-'),dd=new Date(+p[0],+p[1]-1,+p[2]);return pad(+p
 function renderWx(w){
  if(!w||!w.days){$('wx').innerHTML='<div class="empty">날씨 데이터 없음</div>';return}
  var ts=todayStr();
- var h='<div class="now"><div class="ttl" style="margin-bottom:2px">부산 날씨</div><div style="display:flex;align-items:center">'+ico(w.code,52)+'<div class="big" style="margin-left:6px">'+w.temp+'°</div></div><div class="cond">'+label(w.code)+' · 최고 '+w.days[0].max+'° / 최저 '+w.days[0].min+'°</div></div><div class="week">';
+ var h='<div class="now"><div class="ttl" style="margin-bottom:2px">부산 날씨</div><div style="display:flex;align-items:center">'+ico(w.code,48)+'<div class="big" style="margin-left:6px">'+w.temp+'°</div></div><div class="cond">'+label(w.code)+' · 최고 '+w.days[0].max+'° / 최저 '+w.days[0].min+'°</div></div><div class="week">';
  for(var i=0;i<w.days.length;i++){var d=w.days[i],dt=new Date(d.date+'T00:00:00'),rain=kind(d.code)=='rain'||kind(d.code)=='snow';
-  h+='<div class="day'+(d.date==ts?' today':'')+(rain?' rain':'')+'"><div class="dn">'+(d.date==ts?'오늘':DAYS[dt.getDay()])+'</div><div class="dd">'+pad(dt.getMonth()+1)+'/'+pad(dt.getDate())+'</div>'+ico(d.code,38)+'<div class="tt">'+d.max+'° <i>'+d.min+'°</i></div><div class="pp">강수 '+d.pop+'%</div></div>'}
+  h+='<div class="day'+(d.date==ts?' today':'')+(rain?' rain':'')+'"><div class="dn">'+(d.date==ts?'오늘':DAYS[dt.getDay()])+'</div><div class="dd">'+pad(dt.getMonth()+1)+'/'+pad(dt.getDate())+'</div>'+ico(d.code,34)+'<div class="tt">'+d.max+'° <i>'+d.min+'°</i></div><div class="pp">강수 '+d.pop+'%</div></div>'}
  $('wx').innerHTML=h+''}
 
-/* ---------- 슬라이드 / 스와이프 패널 제어 (News, Kev, Nvd, Psirt, Events) ---------- */
 var LIST={news:[],kev:[],nvd:[],psirt:[],events:[]};
 var PER={news:3,kev:3,nvd:3,psirt:3,events:2};
 var MAXP={news:4,kev:3,nvd:4,psirt:4,events:6};
@@ -729,8 +727,8 @@ function evHtml(e){
 var RENDER={
  news:function(n){return A('row',n.link,'<span class="src">'+esc(n.src)+'</span><div class="t">'+esc(n.title)+'</div><span class="ago">'+ago(n.ts)+'</span>')},
  kev:function(v){return A('kev',NVD+v.cve,'<div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div>')},
- nvd:function(n){return A('mini',NVD+n.cve,'<div class="'+(n.score>=9?'sc9':'sc7')+'">CVSS '+n.score+'</div><div><div style="font-size:20px;font-weight:700;color:#22D3EE">'+esc(n.cve)+' <span class="atk l'+(n.lvl||3)+'">'+esc(n.atk)+'</span></div><div style="font-size:16px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(n.cat)+' · '+esc(n.eff)+'</div></div><div style="font-size:15px;color:#7C93B2;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(n.prod)+'</div>')},
- psirt:function(p){return A('mini',p.link,'<div style="text-align:center"><span class="atk l'+(p.lvl||3)+'">'+esc(p.atk)+'</span>'+(p.sev?'<br><span style="font-size:13px;color:#F87171;font-weight:900">'+esc(p.sev)+'</span>':'')+'</div><div><div style="font-size:19px;font-weight:700;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(p.title)+'</div><div style="font-size:15px;color:#7C93B2">'+ago(p.ts)+' 발표</div></div><div style="font-size:15px;color:#22D3EE;text-align:right">Cisco PSIRT</div>')},
+ nvd:function(n){return A('nvd-row',NVD+n.cve,'<div class="'+(n.score>=9?'sc9':'sc7')+'">CVSS '+n.score+'</div><div style="min-width:0"><div style="font-size:19px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span class="atk l'+(n.lvl||3)+'">'+esc(n.atk)+'</span>'+esc(n.prod)+'</div><div style="font-size:15px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(n.cat)+' · '+esc(n.eff)+'</div></div><div style="font-family:Consolas,monospace;font-size:17px;font-weight:700;color:#22D3EE;text-align:right">'+esc(n.cve)+'</div>')},
+ psirt:function(p){return A('psirt-row',p.link,'<div class="src" style="background:rgba(59,130,246,.2);color:#60A5FA">'+esc(p.sev||'권고')+'</div><div style="min-width:0"><div style="font-size:19px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span class="atk l'+(p.lvl||3)+'">'+esc(p.atk)+'</span>'+esc(p.title)+'</div><div style="font-size:14px;color:#7C93B2">'+ago(p.ts)+' 발표</div></div><div class="ago">Cisco</div>')},
  events:evHtml
 };
 
@@ -763,7 +761,6 @@ function bindSwipe(name){
  bindSwipe(n);
  if(AUTO[n]>0)setInterval(function(){nav(n,1)},AUTO[n]*1000)});
 
-/* ---------- 상태 바 ---------- */
 function countTo(el,to){
  to=+to||0;
  var cur=el.getAttribute('data-v'),from=cur==null?0:+cur;
@@ -780,7 +777,6 @@ function renderStatus(st){
  countTo($('c1'),st.new2);countTo($('c2'),st.nvd);countTo($('c3'),st.ours7);
  $('c3id').textContent=(st.ours7_ids||[]).join(', ')}
 
-/* ---------- 도넛 차트 ---------- */
 var TSIG='',COLS=['#EF4444','#F97316','#FACC15','#22D3EE','#64748B'];
 function renderDonut(st){
  var sig=JSON.stringify(st&&st.types);
@@ -788,19 +784,18 @@ function renderDonut(st){
  var ty=(st&&st.types)||[],t=0,i;
  for(i=0;i<ty.length;i++)t+=ty[i].n;
  if(!t){$('donut').innerHTML='<div class="empty">데이터 없음</div>';return}
- var C=2*Math.PI*36,cum=0,segs='',lg='';
+ var C=2*Math.PI*32,cum=0,segs='',lg='';
  for(i=0;i<ty.length;i++){
   var len=C*ty[i].n/t,col=COLS[i%COLS.length];
-  segs+='<circle cx="48" cy="48" r="36" fill="none" stroke="'+col+'" stroke-width="12" transform="rotate(-90 48 48)" style="stroke-dasharray:0 '+C+';transition:stroke-dasharray 1s ease" stroke-dashoffset="'+(-cum)+'" data-d="'+len+' '+(C-len)+'"/>';
+  segs+='<circle cx="42" cy="42" r="32" fill="none" stroke="'+col+'" stroke-width="10" transform="rotate(-90 42 42)" style="stroke-dasharray:0 '+C+';transition:stroke-dasharray 1s ease" stroke-dashoffset="'+(-cum)+'" data-d="'+len+' '+(C-len)+'"/>';
   cum+=len;
   lg+='<div class="lg"><i style="background:'+col+'"></i>'+esc(ty[i].name)+'<b>'+ty[i].n+'건</b></div>'}
- $('donut').innerHTML='<div class="dn2"><div class="dnw"><svg width="96" height="96" viewBox="0 0 96 96"><circle cx="48" cy="48" r="36" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="12"/>'+segs+'</svg><div class="dnc"><b>'+t+'</b><span>30일 합계</span></div></div><div class="lgs">'+lg+'</div></div>';
+ $('donut').innerHTML='<div class="dn2"><div class="dnw"><svg width="84" height="84" viewBox="0 0 84 84"><circle cx="42" cy="42" r="32" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="10"/>'+segs+'</svg><div class="dnc"><b>'+t+'</b><span>30일</span></div></div><div class="lgs">'+lg+'</div></div>';
  setTimeout(function(){
   var cs=$('donut').getElementsByTagName('circle'),k;
   for(k=0;k<cs.length;k++){var dd=cs[k].getAttribute('data-d');if(dd)cs[k].style.strokeDasharray=dd}
  },80)}
 
-/* ---------- 하단 티커 ---------- */
 var TK_LAST='';
 function setTicker(html){
  if(html==TK_LAST)return;TK_LAST=html;
