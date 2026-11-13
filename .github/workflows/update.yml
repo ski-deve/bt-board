@@ -14,6 +14,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: python fetch_data.py
+        env:
+          KMA_API_KEY: ${{ secrets.KMA_API_KEY }}
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
