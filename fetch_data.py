@@ -730,7 +730,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 260px 200px 1fr 52px 28px;row-gap:10px}
+ padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 260px 250px 1fr 52px 28px;row-gap:10px}
 .panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:16px 22px;overflow:hidden;position:relative}
 .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1;min-width:0}
@@ -809,7 +809,7 @@ a.nv,div.nv{display:block;padding:4px 0;border-bottom:1px solid rgba(255,255,255
 .sc9{background:#EF4444;color:#fff}.sc7{background:#F97316;color:#111}
 /* 두 칸 */
 .two{display:grid;grid-template-columns:1fr 1fr;column-gap:14px}
-.two .panel{padding:14px 18px}
+.two .panel{padding:12px 18px}
 .mini{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:20px;line-height:26px}
 .mini:last-child{border-bottom:0}
 .empty{color:#7C93B2;font-size:20px;padding:10px 0;line-height:1.5}
@@ -824,7 +824,7 @@ a.nv,div.nv{display:block;padding:4px 0;border-bottom:1px solid rgba(255,255,255
 .lg i{width:12px;height:12px;border-radius:3px;margin-right:8px;flex:none}
 .lg b{margin-left:auto;color:#22D3EE;font-size:17px}
 /* 국내 보안행사 */
-.ev{display:grid;grid-template-columns:1fr 100px;column-gap:14px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.ev{display:grid;grid-template-columns:1fr 100px;column-gap:14px;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .ev:last-child{border-bottom:0}
 .evl{display:flex;align-items:center;margin-bottom:2px}
 .dt{font-size:20px;font-weight:900;color:#22D3EE;white-space:nowrap;margin-right:10px}
@@ -916,7 +916,11 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
   </div>
 
   <div class="two">
-    <div class="panel"><div class="ttl" style="margin-bottom:10px">Cisco 보안 권고<small>PSIRT</small></div><div id="psirt"></div></div>
+    <div class="panel">
+      <div class="hd" style="margin-bottom:8px"><div class="ttl">Cisco 보안 권고<small>PSIRT</small></div>
+        <div class="pg"><button class="pb" onclick="nav('psirt',-1)">&lsaquo;</button><span class="pd" id="d-psirt"></span><button class="pb" onclick="nav('psirt',1)">&rsaquo;</button></div></div>
+      <div id="psirt" class="fade"></div>
+    </div>
     <div class="panel"><div class="ttl" style="margin-bottom:6px">공격 유형 비율<small>CISA · 최근 30일</small></div><div id="donut"></div></div>
   </div>
 
@@ -983,14 +987,15 @@ function renderWx(w){
  $('wx').innerHTML=h+'</div>'}
 
 /* ---------- 수동/자동 넘김 패널 (뉴스 · 긴급 취약점 · 신규 CVE · 국내 행사) ---------- */
-var LIST={news:[],kev:[],nvd:[],events:[]};
-var PER={news:3,kev:3,nvd:3,events:2};
-var MAXP={news:4,kev:3,nvd:4,events:8};
-var PAGE={news:0,kev:0,nvd:0,events:0};
+var LIST={news:[],kev:[],nvd:[],psirt:[],events:[]};
+var PER={news:3,kev:3,nvd:3,psirt:3,events:2};
+var MAXP={news:4,kev:3,nvd:4,psirt:2,events:8};
+var PAGE={news:0,kev:0,nvd:0,psirt:0,events:0};
 var EMPTY={
  news:'<div class="empty">뉴스 데이터 없음</div>',
  kev:'<div class="empty">KEV 데이터 없음</div>',
  nvd:'<div class="empty">최근 3일간 CVSS 8.0 이상 신규 CVE 없음</div>',
+ psirt:'<div class="empty">Cisco 권고 데이터 없음</div>',
  events:'<div class="empty">표시할 국내 보안 행사가 없습니다</div>'};
 var SUPPRESS=0;
 function evHtml(e){
@@ -1008,6 +1013,7 @@ var RENDER={
  kev:function(v){return A('kev',NVD+v.cve,'<div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div>')},
  nvd:function(n){var dd=new Date((n.ts||0)*1000);
   return A('nv',NVD+n.cve,'<div class="nv1"><b class="'+(n.score>=9?'sc9':'sc7')+'">'+n.score+'</b><span class="atk l'+(n.lvl||3)+'">'+esc(n.atk)+'</span><span class="nvc">'+esc(n.cve)+'</span><span class="nvd2">'+(n.ts?pad(dd.getMonth()+1)+'/'+pad(dd.getDate())+' '+pad(dd.getHours())+':'+pad(dd.getMinutes())+' 공개':'')+'</span></div><div class="nv2">'+esc(n.cat)+' · '+esc(n.eff)+(n.prod?' · '+esc(n.prod):'')+'</div>')},
+ psirt:function(p){return A('mini',p.link,'<span class="atk l'+(p.lvl||3)+'">'+esc(p.atk)+'</span>'+(p.sev?'<span class="atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'">'+esc(p.sev)+'</span>':'')+'<span style="font-size:18px;color:#C7D6EA">'+esc(p.eff)+'</span><div style="font-size:15px;line-height:20px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(p.title)+' · '+ago(p.ts)+'</div>')},
  events:evHtml
 };
 function pages(name){return Math.max(1,Math.min(MAXP[name],Math.ceil(LIST[name].length/PER[name])))}
@@ -1031,7 +1037,7 @@ function bindSwipe(name){
   var dx=e.clientX-sx,dy=e.clientY-sy;
   if(Math.abs(dx)>60&&Math.abs(dx)>Math.abs(dy)*1.5){SUPPRESS=Date.now()+400;nav(name,dx<0?1:-1)}});
  el.addEventListener('click',function(e){if(Date.now()<SUPPRESS){e.preventDefault();e.stopPropagation()}},true)}
-['news','kev','nvd','events'].forEach(function(n){
+['news','kev','nvd','psirt','events'].forEach(function(n){
  bindSwipe(n);
  if(AUTO[n]>0)setInterval(function(){nav(n,1)},AUTO[n]*1000)});
 
@@ -1102,9 +1108,8 @@ function render(d){
  EMPTY.events='<div class="empty">표시할 국내 보안 행사가 없습니다.<br><span style="font-size:15px;color:#7C93B2">수집 결과: '+esc(lg||'기록 없음')+'</span></div>';
  paint('news');paint('kev');paint('nvd');paint('events');
 
- var i,h='',ps=(d.psirt||[]).slice(0,2);
- for(i=0;i<ps.length;i++)h+=A('mini',ps[i].link,'<span class="atk l'+(ps[i].lvl||3)+'">'+esc(ps[i].atk)+'</span>'+(ps[i].sev?'<span class="atk '+(ps[i].sev=='치명'||ps[i].sev=='높음'?'l1':'l3')+'">'+esc(ps[i].sev)+'</span>':'')+'<span style="font-size:18px;color:#C7D6EA">'+esc(ps[i].eff)+'</span><div style="font-size:15px;line-height:20px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(ps[i].title)+' · '+ago(ps[i].ts)+'</div>');
- $('psirt').innerHTML=h||'<div class="empty">Cisco 권고 데이터 없음</div>';
+ LIST.psirt=(d.psirt||[]).slice(0,6);
+ paint('psirt');
 
  renderStatus(d.stats);
  renderDonut(d.stats);
