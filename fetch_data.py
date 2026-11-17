@@ -37,7 +37,6 @@ from pathlib import Path
 NEWS_FEEDS = [
     ("보안뉴스", "https://www.boannews.com/rss/allArticle.xml"),
     ("데일리시큐", "https://www.dailysecu.com/rss/allArticle.xml"),
-    ("KISA", "https://knvd.krcert.or.kr/rss/securityNotice.do"),  # 실패하면 이 줄을 지워도 됩니다
 ]
 CISCO_PSIRT = "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
@@ -67,10 +66,10 @@ BEXCO_DOMAIN = "https://www.bexco.co.kr"
 TECH_KW = [
     "AI", "인공지능", "소프트웨어", "SW", "클라우드", "보안", "정보보호",
     "디지털", "전환", "AX", "ICT", "사이버", "데이터", "테크", "코딩",
-    "프로그래밍", "오픈스택", "AWS", "아키텍처", "챗봇", "테스팅", "에이지테크"
+    "프로그래밍", "오픈스택", "AWS", "아키텍처", "챗봇", "테스팅", "에이지테크","ZTNA"
 ]
 # 보안 관련 공고는 목록 앞쪽에 먼저 보여주고 "보안" 태그를 붙입니다 (소문자로 비교)
-SEC_KW = ["보안", "정보보호", "사이버", "해킹", "개인정보", "랜섬", "침해", "암호", "isms", "제로트러스트",
+SEC_KW = ["보안", "정보보호", "사이버", "해킹", "개인정보", "랜섬", "침해", "암호", "isms", "제로트러스트","ZTNA",
           "ciso", "시큐리티", "security", "cyber", "정보통신망", "취약점"]
 # 제목 또는 링크에 있으면 제외 (security_edu_bot.py 의 exclude_keywords + 입찰·종료 계열)
 EXCLUDE_KW = [
