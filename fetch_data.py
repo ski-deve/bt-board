@@ -3,32 +3,31 @@
 """
 비테크놀로지 보안 전광판 - 수집기 + 화면 생성기 (GitHub Actions 용)
 
-실행하면 site/ 폴더에 두 파일을 만듭니다.
-  site/data.json   : 보안뉴스 / CISA KEV / NVD / Cisco 권고 / 국내 보안행사 / 부산 날씨 / 통계
+실행하면 site/ 폴더에 파일을 만듭니다.
+  site/data.json   : 보안뉴스 / CISA KEV / NVD(CVSS 8.0 이상) / Cisco 권고 / 국내 보안행사 / 부산 날씨 / 통계
   site/index.html  : 1080x1920 세로 전광판 화면 (data.json 을 60초마다 다시 읽음)
 
-국내 보안행사 (우선순위 순서로 표시)
-  1) events.json 에 직접 등록한 행사 (확정 일정, 날짜가 지나면 자동 숨김)
-  2) 벡스코 행사일정 중 보안 관련 행사 (날짜 포함, D-day 표시)
-  3) 부산 기관 게시판(TARGET_SITES)의 보안 관련 교육·세미나·행사 공고 (게시일 표시, 일정은 원문 확인)
-  4) (선택) 뉴스 검색 후보 - USE_NEWS_SEARCH = True 일 때만
-  events.json 예시:
-  [{"date":"2026-12-03","end":"2026-12-03","time":"14:00","title":"행사명","place":"장소","link":"https://...","type":"교육"}]
-  - end, time, place, link, type 은 생략 가능. type 생략 시 제목으로 자동 분류합니다.
+국내 보안행사 (세 곳에서 수집)
+  1) events.json 에 직접 등록한 확정 일정 (날짜가 지나면 자동 숨김)
+     [{"date":"2026-12-03","end":"2026-12-03","time":"14:00","title":"행사명","place":"장소","link":"https://...","type":"교육"}]
+     end, time, place, link, type 은 생략 가능
+  2) 벡스코 행사일정 중 IT·AI·보안 관련 행사
+  3) TARGET_SITES 부산 기관 게시판의 IT·AI·보안 교육/세미나 공고
+     (기존 PC용 security_edu_bot.py 의 수집 방식을 그대로 이식: 브라우저 헤더, 사이트 방문 후 쿠키 유지,
+      SSL 검증 해제, 기술 키워드 필터, 제외 키워드, 지난 연도 제목 제외)
 
 외부 라이브러리 없이 파이썬 3 표준 라이브러리만 사용합니다.
 로컬 테스트:  python fetch_data.py  ->  site 폴더에서  python -m http.server 8080
 """
 import email.utils
 import html
+import http.cookiejar
 import json
-import math
 import os
 import re
 import ssl
 import time
 import datetime as dt
-import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -38,129 +37,134 @@ from pathlib import Path
 NEWS_FEEDS = [
     ("보안뉴스", "https://www.boannews.com/rss/allArticle.xml"),
     ("데일리시큐", "https://www.dailysecu.com/rss/allArticle.xml"),
-    ("KISA", "https://kisa.or.kr/rss/402"),  # KISA 보도자료 (공식 RSS 목록: https://www.kisa.or.kr/702)
+    ("KISA", "https://knvd.krcert.or.kr/rss/securityNotice.do"),  # 실패하면 이 줄을 지워도 됩니다
 ]
 CISCO_PSIRT = "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 BUSAN = (35.1796, 129.0756)
-# 기상청 단기예보 인증키 (공공데이터포털). 코드에 직접 적지 말고 환경변수 KMA_API_KEY 로 전달하세요.
-#   GitHub: 저장소 Settings > Secrets and variables > Actions 에 KMA_API_KEY 로 등록
-# 키가 없거나 호출이 실패하면 자동으로 Open-Meteo 날씨를 사용합니다.
-KMA_KEY = os.environ.get("KMA_API_KEY", "").strip()
-KMA_BASE = "https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0"
-KST = dt.timezone(dt.timedelta(hours=9))
 EVENTS_FILE = Path("events.json")
 
+# NVD 신규 취약점: CVSS 점수 기준과 표시 개수
+NVD_MIN = 8.0     # 이 점수 이상만 표시
+NVD_MAX = 10      # 최신순으로 최대 몇 건
+NVD_DAYS = 3      # 최근 며칠 안에 공개된 것을 대상으로 할지
+
 # 위협 수준 (자체 산정 기준이며 국가 공식 경보 단계와 무관합니다)
-#   점수 = 신규 악용(2일, 최대 8) + 취급 제품 해당(7일, 건당 3점, 최대 6) + Critical CVE 5건 이상(2점) + Cisco 치명·높음 권고(3점)
+#   점수 = 신규 악용(최근 2일, 최대 8) + 취급 제품 해당(7일, 건당 3점, 최대 6) + CVSS 8.0 이상 15건 이상(2점) + Cisco 치명·높음 권고(3점)
 THREAT_MID = 5     # 이 점수 이상이면 "주의"
 THREAT_HIGH = 10   # 이 점수 이상이면 "경계"
 
-# 자동 넘김 간격(초). 0 이면 끔 (기본: 수동 넘김 - 버튼 또는 좌우 드래그)
-AUTO = {"news": 0, "kev": 0, "events": 0, "nvd": 0, "psirt": 0}
+# 자동 넘김 간격(초). 0 이면 끔 (기본: 수동 넘김)
+AUTO = {"news": 0, "kev": 0, "nvd": 0, "events": 0}
 
-# ---- 국내 보안행사 수집 대상 (부산 기관 게시판) ----
-#   require_param : 게시글 링크(또는 속성)에 이 문자열이 있는 항목만 게시글로 인정
-#   need_event    : True 면 제목에 행사 단어(세미나, 교육, 모집 등)도 있어야 통과
-#   label         : 화면에 표시할 짧은 이름
-TARGET_SITES = [
-    {"name": "부산정보산업진흥원_ICT교육", "label": "BIPA 교육",
-     "url": "https://bipa.kr/board/training/list", "domain": "https://bipa.kr",
-     "require_param": "seq=", "need_event": False},
-    {"name": "부산정보산업진흥원_일반공고", "label": "BIPA 공고",
-     "url": "https://bipa.kr/board/notice/list", "domain": "https://bipa.kr",
-     "require_param": "seq=", "need_event": True},
-    {"name": "부산경제진흥원_소상공인디지털", "label": "BEPA",
-     "url": "https://www.bepa.kr/kor/view.do?no=1502", "domain": "https://www.bepa.kr",
-     "require_param": "idx=", "need_event": True, "lenient_ssl": True},
-    {"name": "부산경제진흥원_기업지원사업", "label": "BEPA",
-     "url": "https://www.bepa.kr/kor/view.do?no=1505", "domain": "https://www.bepa.kr",
-     "require_param": "idx=", "need_event": True, "lenient_ssl": True},
-    {"name": "부산과학기술고등교육진흥원_사업", "label": "BISTEP",
-     "url": "https://www.bistep.re.kr/board.es?mid=a10301010000&bid=0002", "domain": "https://www.bistep.re.kr",
-     "require_param": "nttSn=", "need_event": True, "lenient_ssl": True},
-    {"name": "부산상공회의소_교육행사", "label": "부산상의",
-     "url": "https://www.bcci.or.kr/", "domain": "https://www.bcci.or.kr",
-     "require_param": "seq=", "need_event": True},
-    {"name": "부산지방중소벤처기업청_공고", "label": "부산중기청",
-     "url": "https://www.mss.go.kr/site/busan/ex/bbs/List.do?cbIdx=277", "domain": "https://www.mss.go.kr",
-     "require_param": "seq=", "need_event": True},
-]
-# 벡스코 행사일정 (보안 관련 제목만 표시)
+# 국내(부산) 교육·세미나·행사를 가져올 기관 게시판 (기존 security_edu_bot.py 와 동일)
+TARGET_SITES = [    {        "name": "부산정보산업진흥원_ICT교육",        "url": "https://bipa.kr/board/training/list",        "domain": "https://bipa.kr",        "require_param": "seq="    },    {        "name": "부산정보산업진흥원_일반공고",        "url": "https://bipa.kr/board/notice/list",        "domain": "https://bipa.kr",        "require_param": "seq="    },    {        "name": "부산경제진흥원_소상공인디지털",        "url": "https://www.bepa.kr/kor/view.do?no=1502",        "domain": "https://www.bepa.kr",        "require_param": "idx="    },    {        "name": "부산경제진흥원_기업지원사업",        "url": "https://www.bepa.kr/kor/view.do?no=1505",        "domain": "https://www.bepa.kr",        "require_param": "idx="    },    {        "name": "부산과학기술고등교육진흥원_사업",        "url": "https://www.bistep.re.kr/board.es?mid=a10301010000&bid=0002",        "domain": "https://www.bistep.re.kr",        "require_param": "nttSn="    },    {        "name": "부산상공회의소_교육행사",        "url": "https://www.bcci.or.kr/",        "domain": "https://www.bcci.or.kr",        "require_param": "seq="    },    {        "name": "부산지방중소벤처기업청_공고",        "url": "https://www.mss.go.kr/site/busan/ex/bbs/List.do?cbIdx=277",        "domain": "https://www.mss.go.kr",        "require_param": "seq="    }]
 BEXCO_URL = "https://www.bexco.co.kr/kor/CMS/EventScheduleMgr/list.do?mCode=MN214"
+BEXCO_DOMAIN = "https://www.bexco.co.kr"
 
-# 보안 관련 키워드 (제목에 하나라도 있어야 표시, 영문은 소문자로 비교). 필요하면 AI, 클라우드 등을 추가하세요.
-SEC_KW = ["보안", "정보보호", "사이버", "해킹", "개인정보", "랜섬", "침해", "암호", "제로트러스트", "zero trust",
-          "시큐리티", "security", "isms", "ciso", "망분리", "취약점", "포렌식", "위협", "방화벽"]
-EXCLUDE_WORDS = ["입찰", "채용", "낙찰", "계약", "합격", "선정 결과", "결과 안내", "결과 공고", "용역"]
-EVENT_WORDS = ["세미나", "교육", "컨퍼런스", "콘퍼런스", "워크숍", "웨비나", "설명회", "포럼", "아카데미",
-               "해커톤", "강좌", "강연", "실습", "행사", "대회", "박람회", "전시"]
-ACTION_WORDS = ["모집", "접수", "개최", "신청", "참가", "초청", "등록", "안내", "예정", "오픈"]
-PAST_WORDS = ["성료", "마쳐", "마치", "성황", "폐막", "막내렸", "참가해", "참가했", "열렸", "진행했", "수료"]
+# 기술 키워드: 제목에 하나라도 있어야 통과 (security_edu_bot.py 의 core_tech_keywords)
+# 영문 약어(AI, SW 등)는 앞뒤에 영문자가 붙지 않은 경우만 일치로 봅니다.
+TECH_KW = [
+    "AI", "인공지능", "소프트웨어", "SW", "클라우드", "보안", "정보보호",
+    "디지털", "전환", "AX", "ICT", "사이버", "데이터", "테크", "코딩",
+    "프로그래밍", "오픈스택", "AWS", "아키텍처", "챗봇", "테스팅", "에이지테크"
+]
+# 보안 관련 공고는 목록 앞쪽에 먼저 보여주고 "보안" 태그를 붙입니다 (소문자로 비교)
+SEC_KW = ["보안", "정보보호", "사이버", "해킹", "개인정보", "랜섬", "침해", "암호", "isms", "제로트러스트",
+          "ciso", "시큐리티", "security", "cyber", "정보통신망", "취약점"]
+# 제목 또는 링크에 있으면 제외 (security_edu_bot.py 의 exclude_keywords + 입찰·종료 계열)
+EXCLUDE_KW = [
+    "마감", "종료", "완료", "결과", "state=end",
+    "임차", "임대", "점포", "상가", "입주", "창업",
+    "무역사절단", "사절단", "수출", "환급", "온누리", "전통시장", "자금지원", "안전경영", "해양산업",
+    "웨딩", "결혼", "음식", "요리", "식품", "채용", "일자리", "취업", "면접",
+    "캠핑", "펫", "반려동물", "뷰티", "패션", "미술", "공연", "축제", "관광", "여행", "국악",
+    "입찰", "계약", "낙찰", "용역", "합격", "성료", "마쳐", "마치", "성황", "폐막", "수료"
+]
+# 행사 종류 자동 분류 (앞에서부터 먼저 일치하는 것을 사용)
 EVENT_TYPES = [
     ("웨비나", ["웨비나", "온라인 강연"]),
     ("컨퍼런스", ["컨퍼런스", "콘퍼런스"]),
-    ("교육", ["교육", "강좌", "아카데미", "실습", "훈련", "과정"]),
+    ("교육", ["교육", "강좌", "아카데미", "실습", "훈련", "과정", "양성", "특강", "캠프"]),
     ("세미나", ["세미나", "포럼", "설명회", "워크숍", "강연"]),
-    ("전시", ["전시", "박람회", "엑스포"]),
-]
-
-# 뉴스 검색(Google 뉴스 RSS) 후보. 뉴스 기사가 섞이므로 기본은 끔
-USE_NEWS_SEARCH = False
-EVENT_SEARCH = [
-    "https://news.google.com/rss/search?q=" + urllib.parse.quote(
-        "보안 세미나 OR 정보보호 세미나 OR 사이버보안 세미나 OR 보안 컨퍼런스 OR 정보보호 컨퍼런스")
-    + "&hl=ko&gl=KR&ceid=KR:ko",
-    "https://news.google.com/rss/search?q=" + urllib.parse.quote(
-        "보안 교육 모집 OR 사이버보안 교육 모집 OR 정보보호 교육 신청 OR 보안 웨비나 OR 정보보호 설명회")
-    + "&hl=ko&gl=KR&ceid=KR:ko",
 ]
 
 OUT = Path("site")
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.5"}
+UA = {"User-Agent": "Mozilla/5.0 (BeeBoard/1.0)"}
 KST = dt.timezone(dt.timedelta(hours=9))
 
+# 기관 사이트용 브라우저 헤더 (security_edu_bot.py 와 동일)
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.9,en;q=0.9",
+}
+
+# SSL 인증서 검증 해제 (security_edu_bot.py 의 verify=False 와 동일) + 오래된 서버 접속 허용
+_CTX = ssl.create_default_context()
+_CTX.check_hostname = False
+_CTX.verify_mode = ssl.CERT_NONE
+try:
+    _CTX.set_ciphers("DEFAULT@SECLEVEL=1")
+except Exception:
+    pass
+try:
+    _CTX.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+except Exception:
+    pass
+
 _KEV_CACHE = None   # KEV 원본 (한 번만 내려받아 재사용)
-_NVD_TOTAL = None   # 최근 2일 Critical CVE 전체 건수
+_NVD_TOTAL = None   # 최근 2일 CVSS 8.0 이상 CVE 건수
+EV_LOG = []         # 행사 수집 결과 요약 (화면에 표시)
 
 
 # ----------------------------- 유틸 -----------------------------
-def http_get(url, timeout=25, lenient_ssl=False):
+def http_get(url, timeout=25):
     req = urllib.request.Request(url, headers=UA)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read()
-    except urllib.error.URLError as e:
-        # 상대 사이트가 인증서 중간 단계를 빠뜨린 경우에만 (lenient_ssl=True 인 사이트), 검증 없이 한 번 더 시도
-        if lenient_ssl and isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
-            ctx = ssl._create_unverified_context()
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-                return r.read()
-        raise
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
 
 
-def http_get_retry(url, timeout=60, tries=3, wait=8):
-    """느린 서버용: 시간 초과/일시 오류면 잠시 쉬었다가 다시 시도"""
-    last = None
-    for i in range(tries):
-        try:
-            return http_get(url, timeout)
-        except Exception as e:
-            last = e
-            print("[재시도]", i + 1, "/", tries, str(e)[:80])
-            if i < tries - 1:
-                time.sleep(wait * (i + 1))
-    raise last
-
-
-def decode_html(raw):
-    for enc in ("utf-8", "cp949"):
+def decode_html(raw, ctype=""):
+    """서버가 알려준 인코딩 → meta 태그 → utf-8 → euc-kr → cp949 순서로 시도"""
+    cands = []
+    m = re.search(r"charset=([\w\-]+)", ctype or "", re.I)
+    if m:
+        cands.append(m.group(1))
+    m = re.search(rb"charset=[\"']?([\w\-]+)", raw[:3000], re.I)
+    if m:
+        cands.append(m.group(1).decode("ascii", "ignore"))
+    cands += ["utf-8", "euc-kr", "cp949"]
+    for enc in cands:
         try:
             return raw.decode(enc)
-        except UnicodeDecodeError:
+        except Exception:
             continue
     return raw.decode("utf-8", "ignore")
+
+
+def fetch_html(url, domain, timeout=15):
+    """기존 security_edu_bot.py 와 같은 방식: 먼저 사이트 대문을 방문해 쿠키를 받고, Referer 를 붙여 목록을 요청"""
+    h = dict(BROWSER_HEADERS)
+    h["Referer"] = domain + "/"
+    last = None
+    for _ in range(2):
+        try:
+            jar = http.cookiejar.CookieJar()
+            op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar),
+                                             urllib.request.HTTPSHandler(context=_CTX))
+            try:
+                op.open(urllib.request.Request(domain, headers=h), timeout=8).read(2048)
+            except Exception:
+                pass
+            with op.open(urllib.request.Request(url, headers=h), timeout=timeout) as r:
+                raw = r.read()
+                ctype = r.headers.get("Content-Type", "")
+            return decode_html(raw, ctype)
+        except Exception as e:
+            last = e
+            time.sleep(1.5)
+    raise last
 
 
 def to_epoch(s):
@@ -182,19 +186,8 @@ def to_epoch(s):
 
 def clean(s):
     s = html.unescape(s or "")
-    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"<[^>]+>", "", s)
     return re.sub(r"\s+", " ", s).strip()
-
-
-def strip_source(title):
-    """Google 뉴스 제목 끝의 ' - 언론사' 를 제거"""
-    parts = title.rsplit(" - ", 1)
-    if len(parts) == 2 and len(parts[1]) <= 20:
-        return parts[0].strip()
-    return title
-
-
-CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}")
 
 
 def parse_rss(url, source):
@@ -205,9 +198,7 @@ def parse_rss(url, source):
         if not title:
             continue
         pub = it.findtext("pubDate") or it.findtext("{http://purl.org/dc/elements/1.1/}date")
-        raw = (it.findtext("description") or "") + " " + title
         out.append({
-            "cves": list(dict.fromkeys(CVE_RE.findall(raw))),
             "src": source,
             "title": title,
             "link": (it.findtext("link") or "").strip(),
@@ -245,7 +236,7 @@ DEFAULT_ATK = ("기타 취약점", "상세 내용은 원문 확인", 3)
 # 대상 분류: (영어 단어들, 분류 이름)
 DEFAULT_CAT = "기타 SW·장비"
 CATS = [
-    (("vpn", "firewall", "adaptive security appliance", "asa", "ftd", "firepower", "fortios", "axgate",
+    (("vpn", "firewall", "adaptive security appliance", "asa", "ftd", "firepower", "fortios", "fortigate",
       "pan-os", "sonicwall", "globalprotect", "netscaler", "big-ip", "secure client"), "방화벽·VPN"),
     (("exchange", "mail", "webmail", "zimbra", "roundcube", "postfix", "esa"), "메일 서버"),
     (("chrome", "chromium", "firefox", "edge", "safari", "browser", "webkit"), "웹 브라우저"),
@@ -256,7 +247,7 @@ CATS = [
     (("router", "switch", "meraki", "access point", "wlc", "camera", "nas", "synology", "qnap", "d-link",
       "dlink", "tp-link", "zyxel"), "네트워크·IoT 장비"),
     (("vmware", "esxi", "vcenter", "hyper-v", "citrix", "kubernetes", "docker", "gitlab", "jenkins", "ibm",
-      "sap", "gpustack", "aispera"), "서버·플랫폼"),
+      "sap", "gpustack", "aspera"), "서버·플랫폼"),
 ]
 # 분류별 우리 취급 솔루션 제안 (영업 포인트)
 SOL = {
@@ -296,20 +287,10 @@ def categorize(text):
 def guess_product(desc):
     """NVD 영문 설명에서 제품명 부분만 대략 추출"""
     try:
-        # "A vulnerability was determined in Linksys EA8100 1.0.3 ..." 형태: 제품명(+모델)만 추출
-        m = re.search(r"(?:determined|found|discovered|identified|classified|detected)\s+in\s+(?:the\s+)?"
-                      r"([A-Za-z0-9][A-Za-z0-9 ._\-/]{2,50}?)(?=\s+v?\d+(?:\.\d+)+|\s*[,.;(]|\s+(?:up to|through|before|prior|and|of|that|this)\b)", desc)
-        if m:
-            return m.group(1).strip()
-        # "NextScan 1.1.0 through 1.2.0 contains ..." / "XWEB EVO before 5.6.2 ..." 형태
-        m = re.match(r"([A-Za-z0-9][A-Za-z0-9 ._\-/]{2,40}?)\s+(?:versions?\s+)?(?:v?\d+(?:\.\d+)+\s+)?(?:through|before|prior to|up to|and earlier)\b", desc)
-        if m:
-            return m.group(1).strip()
         m = re.search(r"(?:vulnerability|flaw|issue|weakness) in (?:the )?(.{4,60}?)"
                       r"(?: (?:of|could|allows|that|which|before|prior|through|version)\b|[,.;(])", desc, re.I)
         if m:
-            r = m.group(1).strip()
-            return (r.rsplit(" in ", 1)[-1].strip() if " in " in r else r)
+            return m.group(1).strip()
         m = re.match(r"(.{4,40}?)(?: (?:before|prior to|through|version|allows|is|in|up to)\b|[,(])", desc)
         return (m.group(1) if m else desc[:40]).strip()
     except Exception:
@@ -338,31 +319,6 @@ def kev_item(v):
     }
 
 
-def csaf_info(link):
-    """Cisco 권고 1건의 공식 CSAF 데이터에서 CVE 번호와 심각도를 가져옴 (실패하면 빈 값)"""
-    m = re.search(r"/CiscoSecurityAdvisory/([^/?#]+)", link or "")
-    if not m:
-        return [], "", None
-    aid = m.group(1)
-    url = "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/%s/csaf/%s.json" % (aid, aid)
-    d = json.loads(http_get(url, 20).decode("utf-8"))
-    cves, v3, other = [], [], []
-    for v in d.get("vulnerabilities") or []:
-        c = (v.get("cve") or "").strip()
-        if c and c not in cves:
-            cves.append(c)
-        for sc in v.get("scores") or []:
-            for k, val in sc.items():
-                if isinstance(val, dict) and val.get("baseScore") is not None:
-                    try:
-                        (v3 if "v3" in k or "v4" in k else other).append(float(val["baseScore"]))
-                    except (TypeError, ValueError):
-                        pass
-    sev = (((d.get("document") or {}).get("aggregate_severity")) or {}).get("text", "")
-    score = max(v3 or other or [0])
-    return cves, sev, (score if score > 0 else None)
-
-
 def psirt_item(x):
     desc = x.get("desc", "")
     atk, eff, lvl = classify(x["title"], desc)
@@ -371,27 +327,17 @@ def psirt_item(x):
         cat = "Cisco 장비·SW"
     m = re.search(r"(?:Impact Rating|Severity)\W{0,6}(Critical|High|Medium|Low)", desc, re.I)
     sev = SEV_KO.get(m.group(1).capitalize(), "") if m else ""
-    if not sev:
-        sev = SEV_KO.get((x.get("csaf_sev") or "").capitalize(), "")
     title = re.sub(r"\s+Vulnerabilit(?:y|ies)$", "", x["title"])
     return {"title": title, "link": x.get("link", ""), "ts": x["ts"],
-            "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev, "cves": x.get("cves", []), "score": x.get("csaf_score")}
+            "atk": atk, "eff": eff, "lvl": lvl, "cat": cat, "sev": sev}
 
 
 # ----------------------------- 수집: 뉴스 / 취약점 -----------------------------
-OBIT_RE = re.compile(r"부고|부음|부친상|모친상|빙부상|빙모상|장인상|장모상|시부상|시모상|조부상|조모상|별세|빈소|발인|영결식|\[\s*訃告\s*\]|訃告")
-
-
-def is_obit(title):
-    """경조사(부고) 기사 여부"""
-    return bool(OBIT_RE.search(title or ""))
-
-
 def fetch_news():
     items, ok = [], 0
     for name, url in NEWS_FEEDS:
         try:
-            items += [x for x in parse_rss(url, name) if not is_obit(x["title"])]
+            items += parse_rss(url, name)
             ok += 1
         except Exception as e:
             print("[실패] 뉴스", name, e)
@@ -424,62 +370,67 @@ def fetch_kev():
     return [kev_item(v) for v in vulns]
 
 
+def nvd_ts(s):
+    """NVD 공개 시각(UTC)을 epoch 초로 변환"""
+    try:
+        return int(dt.datetime.fromisoformat(str(s)[:19]).replace(tzinfo=dt.timezone.utc).timestamp())
+    except Exception:
+        return 0
+
+
 def fetch_nvd():
+    """NVD 에서 CVSS v3 기준 NVD_MIN 이상(HIGH+CRITICAL)을 받아 최신 공개순 NVD_MAX 건 반환"""
     global _NVD_TOTAL
     now = dt.datetime.now(dt.timezone.utc)
-    start = now - dt.timedelta(days=2)
-    q = urllib.parse.urlencode({
-        "cvssV3Severity": "CRITICAL",
-        "pubStartDate": start.strftime("%Y-%m-%dT%H:%M:%S.000"),
-        "pubEndDate": now.strftime("%Y-%m-%dT%H:%M:%S.000"),
-        "resultsPerPage": 50,
-    })
-    data = json.loads(http_get_retry("https://services.nvd.nist.gov/rest/json/cves/2.0?" + q, 60, 3, 8).decode("utf-8"))
-    out = []
-    for v in data.get("vulnerabilities", []):
-        c = v.get("cve", {})
-        score = 0
-        for k in ("cvssMetricV31", "cvssMetricV40", "cvssMetricV30"):
-            if c.get("metrics", {}).get(k):
-                score = c["metrics"][k][0]["cvssData"].get("baseScore", 0)
-                break
-        desc = next((d["value"] for d in c.get("descriptions", []) if d.get("lang") == "en"), "")
-        atk, eff, lvl = classify(desc)
-        out.append({"cve": c.get("id", ""), "score": score, "desc": clean(desc)[:110],
-                    "atk": atk, "eff": eff, "lvl": lvl, "cat": categorize(desc),
-                    "prod": guess_product(clean(desc))})
-    out.sort(key=lambda x: x["score"], reverse=True)
-    _NVD_TOTAL = int(data.get("totalResults", len(out)) or 0)
-    return out[:6]
+    start = now - dt.timedelta(days=NVD_DAYS)
+    found, ok = {}, 0
+    for sev in ("CRITICAL", "HIGH"):   # NVD API 는 심각도를 하나씩만 조회할 수 있어 두 번 호출
+        q = urllib.parse.urlencode({
+            "cvssV3Severity": sev,
+            "pubStartDate": start.strftime("%Y-%m-%dT%H:%M:%S.000"),
+            "pubEndDate": now.strftime("%Y-%m-%dT%H:%M:%S.000"),
+            "resultsPerPage": 1000,
+        })
+        try:
+            data = json.loads(http_get("https://services.nvd.nist.gov/rest/json/cves/2.0?" + q, 90).decode("utf-8"))
+            ok += 1
+        except Exception as e:
+            print("[실패] NVD", sev, e)
+            continue
+        for v in data.get("vulnerabilities", []):
+            c = v.get("cve", {})
+            score = 0
+            for k in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV40"):
+                if c.get("metrics", {}).get(k):
+                    score = c["metrics"][k][0]["cvssData"].get("baseScore", 0)
+                    break
+            if score < NVD_MIN:
+                continue
+            desc = clean(next((d["value"] for d in c.get("descriptions", []) if d.get("lang") == "en"), ""))
+            atk, eff, lvl = classify(desc)
+            cid = c.get("id", "")
+            found[cid] = {"cve": cid, "score": score, "desc": desc[:110], "ts": nvd_ts(c.get("published", "")),
+                          "atk": atk, "eff": eff, "lvl": lvl, "cat": categorize(desc),
+                          "prod": guess_product(desc)}
+        time.sleep(3)   # NVD 무료 호출 제한(30초에 5회)을 지키기 위한 대기
+    if ok == 0:
+        raise RuntimeError("NVD 응답 없음")
+    items = sorted(found.values(), key=lambda x: (x["ts"], x["score"]), reverse=True)
+    cut = time.time() - 48 * 3600
+    _NVD_TOTAL = sum(1 for x in items if x["ts"] >= cut)
+    return items[:NVD_MAX]
 
 
 def fetch_psirt():
     items = parse_rss(CISCO_PSIRT, "Cisco")
     items.sort(key=lambda x: x["ts"], reverse=True)
-    items = items[:6]
-    for x in items:
-        try:
-            cves, sev, score = csaf_info(x.get("link", ""))
-            x["cves"] = list(dict.fromkeys(x.get("cves", []) + cves))
-            x["csaf_sev"] = sev
-            x["csaf_score"] = score
-        except Exception as e:
-            print("[경고] Cisco CSAF 실패", x.get("link", "")[-40:], str(e)[:60])
-    return [psirt_item(x) for x in items]
+    return [psirt_item(x) for x in items[:6]]
 
 
-# ----------------------------- 수집: 국내 보안행사 -----------------------------
-DATE_RE = re.compile(r"(20\d{2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})")
-
-
-def find_dates(text):
-    out = []
-    for m in DATE_RE.finditer(text or ""):
-        try:
-            out.append(dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
-        except ValueError:
-            pass
-    return out
+# ----------------------------- 수집: 국내(부산) 보안·IT 행사 -----------------------------
+A_RE = re.compile(r"<a\b([^>]*)>(.*?)</a>", re.S | re.I)
+HREF_RE = re.compile(r"href\s*=\s*[\"']([^\"']+)[\"']", re.I)
+DATE_RE = re.compile(r"(20\d\d)[.\-/]\s?(\d{1,2})[.\-/]\s?(\d{1,2})")
 
 
 def event_type(title, given=""):
@@ -491,16 +442,32 @@ def event_type(title, given=""):
     return "행사"
 
 
-def passes(title, need_event):
-    """보안 키워드가 있고, 입찰·채용·종료 공고가 아니며, (필요하면) 행사 단어가 있어야 통과"""
+def tech_match(title):
+    """기술 키워드 일치 여부. 영문 약어는 앞뒤에 영문자가 붙지 않아야 일치"""
+    for kw in TECH_KW:
+        if kw.isascii():
+            if re.search(r"(?<![A-Za-z])" + re.escape(kw) + r"(?![A-Za-z])", title):
+                return True
+        elif kw in title:
+            return True
+    return False
+
+
+def is_sec(title):
     low = title.lower()
-    if not any(k in low for k in SEC_KW):
+    return any(k in low for k in SEC_KW)
+
+
+def is_target_title(title, href=""):
+    """security_edu_bot.py 의 필터와 동일: 짧은 제목 제외, 제외 키워드(제목+링크), 지난 연도 제목, 기술 키워드 필수"""
+    if len(title) < 5:
         return False
-    if any(w in title for w in EXCLUDE_WORDS) or any(w in title for w in PAST_WORDS):
+    if any(k in (href + " " + title) for k in EXCLUDE_KW):
         return False
-    if need_event and not (any(w in title for w in EVENT_WORDS) or any(w in title for w in ACTION_WORDS)):
+    year = dt.datetime.now(KST).year
+    if any(str(y) in title for y in range(2020, year)):
         return False
-    return True
+    return tech_match(title)
 
 
 def load_registered_events():
@@ -524,7 +491,7 @@ def load_registered_events():
         if en < today:
             continue
         title = e.get("title", "")
-        out.append({"kind": "event", "src": "등록", "type": event_type(title, e.get("type", "")),
+        out.append({"kind": "event", "type": event_type(title, e.get("type", "")),
                     "date": s.isoformat(), "end": en.isoformat(), "time": e.get("time", ""),
                     "title": title, "place": e.get("place", ""), "link": e.get("link", "")})
     out.sort(key=lambda x: (x["date"], x["title"]))
@@ -532,155 +499,118 @@ def load_registered_events():
 
 
 def scrape_site(site):
-    """게시판 목록 HTML 에서 게시글 링크를 찾아 보안 관련 항목만 추출 (사이트별 구조를 몰라도 동작하는 범용 방식)"""
-    page = decode_html(http_get(site["url"], 30, site.get("lenient_ssl", False)))
-    today = dt.datetime.now(KST).date()
+    """기관 게시판 목록에서 게시글 링크(require_param 포함)를 찾아 IT·AI·보안 교육/공고만 추림"""
+    page = fetch_html(site["url"], site["domain"], 15)
     out, seen = [], set()
-    for m in re.finditer(r"<a\b([^>]*)>(.*?)</a>", page, re.S | re.I):
-        attrs, inner = m.group(1), m.group(2)
-        if site["require_param"] not in html.unescape(attrs):
+    for m in A_RE.finditer(page):
+        hm = HREF_RE.search(m.group(1))
+        if not hm:
             continue
-        title = clean(inner)
-        if len(title) < 6 or not passes(title, site.get("need_event", True)):
+        href = html.unescape(hm.group(1)).strip()
+        if not href or href.lower().startswith(("javascript", "#", "mailto")):
+            continue
+        if site["require_param"] not in href:
+            continue
+        title = clean(m.group(2))
+        if not is_target_title(title, href):
             continue
         key = re.sub(r"\W", "", title)[:30]
         if key in seen:
             continue
         seen.add(key)
-        hm = re.search(r"href\s*=\s*[\"']([^\"']+)[\"']", attrs, re.I)
-        href = html.unescape(hm.group(1)).strip() if hm else ""
-        if not href or href.lower().startswith("javascript") or href.startswith("#"):
-            link = site["url"]
-        else:
-            link = urllib.parse.urljoin(site["url"], href)
-            if not link.startswith(site["domain"]):
-                link = site["url"]
-        ds = find_dates(clean(page[m.end(): m.end() + 400]))
-        posted = ds[0] if ds else None
-        if posted and (today - posted).days > 60:
-            continue
-        ts = int(dt.datetime.combine(posted, dt.time(12), KST).timestamp()) if posted else 0
-        out.append({"kind": "site", "src": site.get("label", site["name"]), "type": event_type(title),
-                    "title": title, "link": link, "ts": ts, "posted": posted.isoformat() if posted else ""})
-    return out
-
-
-def fetch_bexco():
-    """벡스코 행사일정 목록에서 보안 관련 행사만 추출 (날짜 범위 포함)"""
-    page = decode_html(http_get(BEXCO_URL, 30))
-    today = dt.datetime.now(KST).date()
-    out, seen = [], set()
-    for blk in re.findall(r"<(?:li|tr)\b.*?</(?:li|tr)>", page, re.S | re.I):
-        text = clean(blk)
-        ds = find_dates(text)
-        if not ds:
-            continue
-        s = ds[0]
-        e = ds[1] if len(ds) > 1 else ds[0]
-        if e < s:
-            e = s
-        if e < today:
-            continue
-        dm = DATE_RE.search(text)
-        head = text[:dm.start()].strip()
-        tail = DATE_RE.sub("", text[dm.end():], count=1).replace("~", " ").strip()
-        head = re.sub(r"^(?:상세보기|진행중|D-\d+|D-day|이벤트|회의|전시|공연|컨벤션|\s)+", "", head).strip()
-        for cat in (" 회의 ", " 이벤트 ", " 전시 ", " 공연 "):
-            if cat in head:
-                a, b = [p.strip() for p in head.split(cat, 1)]
-                if a and b and (a == b or a in b or b in a):
-                    head = b if len(b) >= len(a) else a
-                break
-        if len(head) < 4 or not any(k in head.lower() for k in SEC_KW):
-            continue
-        if any(w in head for w in EXCLUDE_WORDS):
-            continue
-        key = re.sub(r"\W", "", head)[:30] + s.isoformat()
-        if key in seen:
-            continue
-        seen.add(key)
-        hm = re.search(r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"']", blk, re.I)
-        href = html.unescape(hm.group(1)).strip() if hm else ""
-        link = BEXCO_URL if (not href or href.lower().startswith("javascript") or href.startswith("#")) \
-            else urllib.parse.urljoin(BEXCO_URL, href)
-        out.append({"kind": "event", "src": "벡스코", "type": event_type(head), "date": s.isoformat(),
-                    "end": e.isoformat(), "time": "", "title": head, "place": "벡스코 " + tail[:30].strip(),
-                    "link": link})
-    out.sort(key=lambda x: (x["date"], x["title"]))
+        posted = ""
+        dm = DATE_RE.search(page[m.end(): m.end() + 500])
+        if dm:
+            posted = "%s-%02d-%02d" % (dm.group(1), int(dm.group(2)), int(dm.group(3)))
+        out.append({"kind": "board", "site": site["name"].split("_")[0], "type": event_type(title),
+                    "sec": is_sec(title), "title": title,
+                    "link": urllib.parse.urljoin(site["url"], href), "posted": posted})
     return out[:6]
 
 
-def fetch_event_search():
-    """(선택) 검색 RSS 에서 교육·세미나·컨퍼런스 모집·공지 기사만 후보로 모음"""
-    found, seen = [], set()
-    cutoff = time.time() - 21 * 86400
-    for url in EVENT_SEARCH:
-        try:
-            items = parse_rss(url, "검색")
-        except Exception as e:
-            print("[실패] 행사 검색", e)
+def fetch_bexco():
+    """벡스코 행사일정에서 IT·AI·보안 관련 행사 추출 (페이지 구조를 날짜 범위 기준으로 해석)"""
+    page = fetch_html(BEXCO_URL, BEXCO_DOMAIN, 20)
+    page = re.sub(r"(?is)<(script|style).*?</\1>", " ", page)
+    toks = [clean(t) for t in re.split(r"<[^>]+>", page)]
+    toks = [t for t in toks if t]
+    rng = re.compile(r"(20\d\d-\d\d-\d\d)\s*~\s*(20\d\d-\d\d-\d\d)")
+    noise = re.compile(r"^(상세보기|진행중|이벤트|회의|전시|공연|D-\d+|D-Day|예정|종료|포스터형|리스트형)$")
+    today = dt.datetime.now(KST).date().isoformat()
+    out, seen = [], set()
+    for i, t in enumerate(toks):
+        m = rng.search(t)
+        if not m:
             continue
-        for it in items:
-            t = strip_source(it["title"])
-            if it["ts"] < cutoff or not passes(t, True):
+        title = ""
+        for j in range(i - 1, max(i - 6, -1), -1):
+            c = toks[j]
+            if noise.match(c) or len(c) < 4 or rng.search(c):
                 continue
-            key = re.sub(r"\W", "", t)[:30]
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append({"kind": "search", "type": event_type(t), "title": t,
-                          "link": it["link"], "ts": it["ts"]})
-    found.sort(key=lambda x: x["ts"], reverse=True)
-    return found[:4]
+            title = c
+            break
+        if not title or m.group(2) < today:
+            continue
+        if not is_target_title(title):
+            continue
+        place = t[m.end():].strip()
+        if not place and i + 1 < len(toks) and not rng.search(toks[i + 1]):
+            place = toks[i + 1]
+        key = title + m.group(1)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"kind": "bexco", "type": event_type(title), "sec": is_sec(title),
+                    "date": m.group(1), "end": m.group(2), "time": "", "title": title,
+                    "place": ("벡스코 " + place[:30]) if place else "벡스코", "link": BEXCO_URL})
+    out.sort(key=lambda x: (not x["sec"], x["date"]))
+    return out[:6]
 
 
 def fetch_events():
+    EV_LOG[:] = []
     reg = load_registered_events()
-    fails, tried = 0, 0
 
     bex = []
-    tried += 1
     try:
         bex = fetch_bexco()
         print("[수집] 벡스코", len(bex), "건")
     except Exception as e:
-        fails += 1
         print("[실패] 벡스코", e)
 
-    sites, seen = [], set()
-    for site in TARGET_SITES:
-        tried += 1
+    boards, ok_sites = [], 0
+    for s in TARGET_SITES:
         try:
-            got = scrape_site(site)
-            print("[수집]", site["name"], len(got), "건")
+            got = scrape_site(s)
+            ok_sites += 1
+            print("[수집]", s["name"], len(got), "건")
+            boards += got
         except Exception as e:
-            fails += 1
-            print("[실패]", site["name"], e)
+            print("[실패]", s["name"], e)
+        time.sleep(1.2)
+
+    cutoff = (dt.datetime.now(KST).date() - dt.timedelta(days=60)).isoformat()
+    boards.sort(key=lambda x: x["posted"], reverse=True)      # 게시일 최신순 (게시일 없는 항목은 뒤)
+    boards.sort(key=lambda x: not x["sec"])                    # 보안 관련 공고를 앞으로 (순서 유지)
+    seen, uniq = set(), []
+    for b in boards:
+        key = re.sub(r"\W", "", b["title"])[:30]
+        if key in seen or (b["posted"] and b["posted"] < cutoff):
             continue
-        for g in got:
-            key = re.sub(r"\W", "", g["title"])[:30]
-            if key not in seen:
-                seen.add(key)
-                sites.append(g)
-    sites.sort(key=lambda x: x["ts"], reverse=True)
+        seen.add(key)
+        uniq.append(b)
+    boards = uniq[:10]
 
-    srch = []
-    if USE_NEWS_SEARCH:
-        try:
-            srch = fetch_event_search()
-        except Exception as e:
-            print("[실패] 행사 검색", e)
-
-    allv = reg + bex + sites[:12] + srch
-    print("행사 합계: 등록", len(reg), "/ 벡스코", len(bex), "/ 기관 게시판", len(sites), "/ 검색", len(srch),
-          "/ 수집 실패", fails, "of", tried)
-    if not allv and fails > 0:
-        raise RuntimeError("행사 수집 실패 (이전 데이터 유지)")
-    return allv[:20]
+    EV_LOG.extend(["직접등록 %d건" % len(reg), "벡스코 %d건" % len(bex),
+                   "기관 게시판 %d건 (%d곳 중 %d곳 응답)" % (len(boards), len(TARGET_SITES), ok_sites)])
+    if ok_sites == 0:
+        EV_LOG.append("기관 사이트 접속 실패(해외 서버 차단 가능)")
+    print("행사:", " / ".join(EV_LOG))
+    return reg + bex + boards
 
 
 # ----------------------------- 수집: 날씨 -----------------------------
-def _fetch_weather_openmeteo():
+def fetch_weather():
     q = urllib.parse.urlencode({
         "latitude": BUSAN[0], "longitude": BUSAN[1],
         "current": "temperature_2m,weather_code",
@@ -697,129 +627,6 @@ def _fetch_weather_openmeteo():
             "pop": dd["precipitation_probability_max"][i],
         })
     return {"temp": round(d["current"]["temperature_2m"]), "code": d["current"]["weather_code"], "days": days}
-
-
-def kma_grid(lat, lon):
-    """위경도 -> 기상청 격자(nx, ny) (람베르트 정형도법, 기상청 공식 변환식)"""
-    RE, GRID, SLAT1, SLAT2, OLON, OLAT, XO, YO = 6371.00877, 5.0, 30.0, 60.0, 126.0, 38.0, 43, 136
-    D = math.pi / 180.0
-    re = RE / GRID
-    slat1, slat2, olon, olat = SLAT1 * D, SLAT2 * D, OLON * D, OLAT * D
-    sn = math.tan(math.pi * 0.25 + slat2 * 0.5) / math.tan(math.pi * 0.25 + slat1 * 0.5)
-    sn = math.log(math.cos(slat1) / math.cos(slat2)) / math.log(sn)
-    sf = math.tan(math.pi * 0.25 + slat1 * 0.5)
-    sf = math.pow(sf, sn) * math.cos(slat1) / sn
-    ro = math.tan(math.pi * 0.25 + olat * 0.5)
-    ro = re * sf / math.pow(ro, sn)
-    ra = math.tan(math.pi * 0.25 + lat * D * 0.5)
-    ra = re * sf / math.pow(ra, sn)
-    theta = lon * D - olon
-    if theta > math.pi:
-        theta -= 2.0 * math.pi
-    if theta < -math.pi:
-        theta += 2.0 * math.pi
-    theta *= sn
-    return int(ra * math.sin(theta) + XO + 0.5), int(ro - ra * math.cos(theta) + YO + 0.5)
-
-
-def kma_call(op, base_date, base_time, nx, ny, rows=1000):
-    """기상청 단기예보 API 호출 -> item 목록 (여러 페이지면 모두 합침)"""
-    key = urllib.parse.unquote(KMA_KEY)
-    items, page = [], 1
-    while True:
-        q = urllib.parse.urlencode({
-            "serviceKey": key, "pageNo": page, "numOfRows": rows, "dataType": "JSON",
-            "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny})
-        d = json.loads(http_get(KMA_BASE + "/" + op + "?" + q).decode("utf-8"))
-        r = d["response"]
-        if r["header"]["resultCode"] != "00":
-            raise RuntimeError("기상청 응답 오류 " + str(r["header"]["resultCode"]) + " " + str(r["header"].get("resultMsg", "")))
-        body = r["body"]
-        it = (body.get("items") or {}).get("item") or []
-        items.extend(it if isinstance(it, list) else [it])
-        if page * rows >= int(body.get("totalCount") or 0):
-            return items
-        page += 1
-
-
-def kma_code(sky, pty):
-    """기상청 하늘상태/강수형태 -> 화면 아이콘 코드 (WMO 코드 체계에 맞춤)"""
-    if pty in (1, 2, 4, 5, 6):
-        return 61          # 비 (비/눈·소나기·빗방울 포함)
-    if pty in (3, 7):
-        return 71          # 눈 (눈날림 포함)
-    return {1: 0, 3: 2, 4: 3}.get(sky, 0)   # 맑음 / 구름많음 / 흐림
-
-
-def _fetch_weather_kma():
-    nx, ny = kma_grid(BUSAN[0], BUSAN[1])
-    now = dt.datetime.now(KST)
-    # 현재 기온/강수: 초단기실황 (매시 정각 자료, 약 40분 뒤 안정적으로 제공)
-    nb = now - dt.timedelta(minutes=40)
-    ncst = kma_call("getUltraSrtNcst", nb.strftime("%Y%m%d"), nb.strftime("%H00"), nx, ny)
-    obs = {i["category"]: i["obsrValue"] for i in ncst}
-    temp = round(float(obs["T1H"]))
-    pty_now = int(float(obs.get("PTY", 0)))
-    # 일별 최고/최저/강수확률: 단기예보 (당일 02시 발표분 = 오늘 최저·최고가 모두 포함, 02:15 이전엔 전날 23시 발표분)
-    if now.hour * 60 + now.minute >= 2 * 60 + 15:
-        fb, ft = now, "0200"
-    else:
-        fb, ft = now - dt.timedelta(days=1), "2300"
-    fc = kma_call("getVilageFcst", fb.strftime("%Y%m%d"), ft, nx, ny)
-    byday = {}
-    for i in fc:
-        byday.setdefault(i["fcstDate"], {}).setdefault(i["category"], []).append((i["fcstTime"], i["fcstValue"]))
-    days = []
-    for date in sorted(byday):
-        c = byday[date]
-        tmp = [float(v) for _, v in c.get("TMP", [])]
-        tmn = [float(v) for _, v in c.get("TMN", [])] or tmp
-        tmx = [float(v) for _, v in c.get("TMX", [])] or tmp
-        if not tmn or not tmx:
-            continue
-        pop = max([int(float(v)) for _, v in c.get("POP", [])] or [0])
-        day = lambda lst: [int(float(v)) for t, v in lst if "06" <= t[:2] <= "21"]   # 낮 시간대(06~21시)
-        ptys = [p for p in day(c.get("PTY", [])) if p > 0]
-        if ptys:
-            code = kma_code(1, max(set(ptys), key=ptys.count))
-        else:
-            sk = day(c.get("SKY", [])) or [1]
-            code = kma_code(max(set(sk), key=lambda x: (sk.count(x), x)), 0)
-        d = dt.date(int(date[:4]), int(date[4:6]), int(date[6:]))
-        days.append({"date": d.isoformat(), "code": code, "max": round(max(tmx)), "min": round(min(tmn)), "pop": pop})
-    if not days:
-        raise RuntimeError("기상청 단기예보 데이터 없음")
-    # 현재 아이콘: 실황 강수가 있으면 그 값, 없으면 현재 시각에 가장 가까운 예보의 하늘상태
-    today = now.strftime("%Y%m%d")
-    skies = [(abs(int(t[:2]) - now.hour), int(float(v))) for t, v in byday.get(today, {}).get("SKY", [])]
-    sky_now = min(skies)[1] if skies else 1
-    code_now = kma_code(sky_now, pty_now) if pty_now else kma_code(sky_now, 0)
-    return {"temp": temp, "code": code_now, "days": days}
-
-
-def fetch_weather():
-    """기상청 값을 우선 사용. 기상청이 주지 않는 먼 날짜(3일 이후)는 Open-Meteo 로 채워 7일을 유지."""
-    om = None
-    try:
-        om = _fetch_weather_openmeteo()
-    except Exception as e:
-        print("[경고] Open-Meteo 날씨 실패:", e)
-    if not KMA_KEY:
-        print("[안내] KMA_API_KEY 가 비어 있어 Open-Meteo 날씨를 사용합니다 (시크릿 이름/workflow env 확인)")
-    if KMA_KEY:
-        try:
-            k = _fetch_weather_kma()
-            print("[안내] 기상청 날씨 적용 (3일 이후는 Open-Meteo)")
-            if not om:
-                return dict(k, src="KMA")
-            kd = {d["date"]: d for d in k["days"]}
-            days = [kd.get(d["date"], d) for d in om["days"]]
-            return {"temp": k["temp"], "code": k["code"], "days": days, "src": "KMA"}
-        except Exception as e:
-            print("[경고] 기상청 날씨 실패 -> Open-Meteo 로 대체:", e)
-    if om:
-        return dict(om, src="Open-Meteo")
-    raise RuntimeError("날씨 수집 실패")
 
 
 # ----------------------------- 통계 (위협 수준 / 30일 공격 유형) -----------------------------
@@ -853,7 +660,7 @@ def build_stats(psirt, prev_nvd=0):
     now = time.time()
     psirt_hi = any(p.get("sev") in ("치명", "높음") and now - p.get("ts", 0) <= 86400 for p in (psirt or []))
     nvd = _NVD_TOTAL if _NVD_TOTAL is not None else prev_nvd
-    score = min(new2, 8) + 3 * min(len(ours7_ids), 2) + (2 if nvd >= 5 else 0) + (3 if psirt_hi else 0)
+    score = min(new2, 8) + 3 * min(len(ours7_ids), 2) + (2 if nvd >= 15 else 0) + (3 if psirt_hi else 0)
     level = "경계" if score >= THREAT_HIGH else ("주의" if score >= THREAT_MID else "안정")
 
     items = sorted([(k, n) for k, n in types.items() if k != "기타"], key=lambda x: -x[1])
@@ -895,6 +702,7 @@ def main():
             print("[실패]", key, e)
             data["errors"].append(key)
             data[key] = prev.get(key, empty)
+    data["ev_log"] = list(EV_LOG) if "events" not in data["errors"] else prev.get("ev_log", [])
     try:
         data["stats"] = build_stats(data.get("psirt", []), (prev.get("stats") or {}).get("nvd", 0))
         print("[성공] stats 위협수준:", data["stats"]["level"], "점수:", data["stats"]["score"])
@@ -904,10 +712,10 @@ def main():
         data["stats"] = prev.get("stats", {})
     OUT.mkdir(exist_ok=True)
     (OUT / "data.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    # AUTO 설정을 화면(JS)에 전달 (이 값이 없으면 화면 스크립트가 멈춰 빈 화면이 됩니다)
     (OUT / "index.html").write_text(INDEX_HTML.replace("__AUTO__", json.dumps(AUTO)), encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
-    print("완료:", len(data["news"]), "news,", len(data["kev"]), "kev,", len(data["events"]), "events")
+    print("완료:", len(data["news"]), "news,", len(data["kev"]), "kev,", len(data["nvd"]), "nvd,",
+          len(data["events"]), "events")
 
 
 # ----------------------------- 화면 (TV 브라우저 호환을 위해 단순 문법 사용) -----------------------------
@@ -922,15 +730,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
 html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#E5EEF9}
 #board{position:absolute;left:50%;top:50%;width:1080px;height:1920px;transform-origin:center center;
  background:radial-gradient(ellipse at 20% 0%,#0F2A4A 0%,#0A1428 45%,#050A16 100%);
- padding:14px;display:grid;grid-template-rows:106px 62px 160px 324px 274px 198px 198px 170px 1fr 44px 26px;row-gap:8px}
+ padding:14px;display:grid;grid-template-rows:116px 66px 160px 310px 290px 260px 200px 1fr 52px 28px;row-gap:10px}
 .panel{background:rgba(15,28,52,.85);border:1px solid rgba(34,211,238,.18);border-radius:20px;padding:16px 22px;overflow:hidden;position:relative}
 .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .ttl{font-size:26px;font-weight:900;letter-spacing:-.5px;color:#22D3EE;padding-left:12px;border-left:6px solid #22D3EE;line-height:1.1;min-width:0}
-.ttl small{font-size:18px;font-weight:500;color:#93A9C6;margin-left:10px}
+.ttl small{font-size:18px;font-weight:500;color:#7C93B2;margin-left:10px}
 .pg{display:flex;align-items:center;flex:none;margin-left:10px}
 .pb{width:44px;height:38px;border:0;border-radius:10px;background:rgba(34,211,238,.15);color:#22D3EE;font-size:28px;font-weight:900;line-height:36px;cursor:pointer;margin-left:6px}
 .pb:hover,.pb:focus{outline:2px solid #22D3EE;outline-offset:1px}
-.pd{display:inline-block;margin:0 6px;min-width:44px;text-align:center;font-size:20px;font-weight:700;color:#93A9C6}
+.pd{display:inline-block;margin:0 6px;min-width:44px;text-align:center;font-size:20px;font-weight:700;color:#7C93B2}
 .fade{transition:opacity .25s ease;min-height:0}
 .fade.out{opacity:0}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
@@ -939,22 +747,18 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .brand{display:flex;align-items:center}
 .brand svg{margin-right:16px}
 .brand b{font-size:40px;font-weight:900;letter-spacing:-1px;display:block;line-height:1.1}
-.brand span{font-size:20px;color:#93A9C6}
+.brand span{font-size:20px;color:#7C93B2}
 .clock{text-align:right}
 #clock{font-size:60px;font-weight:900;color:#22D3EE;line-height:60px;letter-spacing:-2px}
 #date{font-size:22px;font-weight:700;line-height:28px}
 /* 상태 바 */
 #status{display:flex;align-items:center;padding:6px 18px}
-.chip{display:flex;align-items:center;padding:3px 22px 3px 16px;border-radius:999px;margin-right:22px;white-space:nowrap;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.06)}
-.chip .cd{display:inline-block;width:14px;height:14px;border-radius:50%;margin-right:12px;animation:blink 1.6s infinite}
-.chip .cl{font-size:17px;font-weight:500;letter-spacing:1px;color:#A9C1DE;margin-right:12px}
-.chip b{font-size:30px;font-weight:900;line-height:1.1;letter-spacing:1px}
-.chip.lv0{background:linear-gradient(135deg,rgba(52,211,153,.30),rgba(52,211,153,.06));border-color:rgba(52,211,153,.65);box-shadow:0 0 18px rgba(52,211,153,.28),inset 0 0 12px rgba(52,211,153,.12)}
-.chip.lv0 .cd{background:#34D399;box-shadow:0 0 10px #34D399}.chip.lv0 b{color:#6EF0BC}
-.chip.lv1{background:linear-gradient(135deg,rgba(250,204,21,.30),rgba(250,204,21,.06));border-color:rgba(250,204,21,.65);box-shadow:0 0 18px rgba(250,204,21,.28),inset 0 0 12px rgba(250,204,21,.12)}
-.chip.lv1 .cd{background:#FACC15;box-shadow:0 0 10px #FACC15}.chip.lv1 b{color:#FDE047}
-.chip.lv2{background:linear-gradient(135deg,rgba(249,115,22,.34),rgba(249,115,22,.08));border-color:rgba(249,115,22,.7);box-shadow:0 0 18px rgba(249,115,22,.32),inset 0 0 12px rgba(249,115,22,.14)}
-.chip.lv2 .cd{background:#F97316;box-shadow:0 0 10px #F97316}.chip.lv2 b{color:#FDBA74}
+.chip{display:flex;align-items:baseline;font-size:20px;font-weight:700;padding:4px 16px;border-radius:12px;background:rgba(255,255,255,.08);margin-right:22px;white-space:nowrap}
+.chip b{font-size:30px;font-weight:900;margin-left:8px}
+.chip small{font-size:13px;margin-left:8px;opacity:.7;font-weight:500}
+.chip.lv0{background:#34D399;color:#04281c}
+.chip.lv1{background:#FACC15;color:#111}
+.chip.lv2{background:#F97316;color:#111}
 #stats{display:flex;flex:1;justify-content:space-between}
 .st{display:flex;align-items:baseline;white-space:nowrap}
 .st .lb{font-size:17px;color:#9FB4CE;margin-right:8px}
@@ -971,16 +775,16 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .day.today{border:2px solid #22D3EE;background:rgba(34,211,238,.1)}
 .day.rain{background:rgba(59,130,246,.22)}
 .day .dn{font-size:20px;font-weight:700;line-height:24px}
-.day .dd{font-size:14px;color:#93A9C6;line-height:16px}
+.day .dd{font-size:14px;color:#7C93B2;line-height:16px}
 .day .tt{font-size:20px;font-weight:700;line-height:24px}
-.day .tt i{font-style:normal;color:#93A9C6;font-weight:500}
+.day .tt i{font-style:normal;color:#7C93B2;font-weight:500}
 .day .pp{font-size:15px;color:#60A5FA;line-height:18px}
 /* 뉴스 행 */
-.row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.row{display:grid;grid-template-columns:100px 1fr 80px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .row:last-child{border-bottom:0}
 .src{font-size:17px;font-weight:700;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE}
 .t{font-size:25px;font-weight:700;line-height:1.28;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.ago{font-size:17px;color:#93A9C6;text-align:right}
+.ago{font-size:17px;color:#7C93B2;text-align:right}
 /* 긴급 취약점 */
 .kev{display:grid;grid-template-columns:215px 1fr 120px;column-gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .kev:last-child{border-bottom:0}
@@ -994,49 +798,38 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .atk{display:inline-block;font-size:17px;font-weight:900;padding:1px 9px;border-radius:6px;margin-right:8px;vertical-align:middle;line-height:22px}
 .l1{background:#EF4444;color:#fff}.l2{background:#F97316;color:#111}.l3{background:#FACC15;color:#111}
 .sol{color:#22D3EE;font-weight:700}
+/* 신규 고위험 CVE (NVD) */
+a.nv,div.nv{display:block;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.nv:last-child{border-bottom:0}
+.nv1{display:flex;align-items:center;height:28px}
+.nv1 b{display:inline-block;min-width:54px;text-align:center;border-radius:6px;margin-right:8px;padding:0 6px;font-size:19px;line-height:26px}
+.nvc{font-family:Consolas,monospace;color:#22D3EE;font-weight:700;font-size:19px}
+.nvd2{margin-left:auto;font-size:15px;color:#7C93B2;white-space:nowrap}
+.nv2{font-size:17px;line-height:22px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sc9{background:#EF4444;color:#fff}.sc7{background:#F97316;color:#111}
 /* 두 칸 */
-.vr{display:grid;grid-template-columns:215px minmax(0,1fr) 120px;column-gap:12px;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.07)}
-.vr:last-child{border-bottom:0}
-.vr .a{font-size:24px;font-weight:700;line-height:28px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.vr .b{font-size:19px;line-height:24px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.vr .cve{line-height:28px}
-.vr .cv2{font-family:Consolas,monospace;font-size:21px;font-weight:700;color:#22D3EE;line-height:25px;white-space:nowrap}
-.vr .cn{font-size:16px;line-height:22px;color:#93A9C6;white-space:nowrap}
-.vr .sc{text-align:right;font-size:30px;font-weight:900;line-height:30px;font-variant-numeric:tabular-nums}
-.vr .sc small{display:block;font-size:14px;line-height:16px;font-weight:500;color:#93A9C6}
-.vr .sc.s9{color:#F87171}.vr .sc.s7{color:#FB923C}.vr .sc.s4{color:#FACC15}
-.vr.p{grid-template-columns:215px minmax(0,1fr) 150px}
-.vr .ag{text-align:right;font-size:18px;color:#93A9C6;font-weight:700}
+.two{display:grid;grid-template-columns:1fr 1fr;column-gap:14px}
+.two .panel{padding:14px 18px}
 .mini{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:20px;line-height:26px}
 .mini:last-child{border-bottom:0}
-.mini b{display:inline-block;min-width:54px;text-align:center;border-radius:6px;margin-right:8px;padding:0 6px;font-size:19px}
-.m1{display:flex;align-items:center;white-space:nowrap;overflow:hidden;line-height:28px}
-.m1 .atk{margin-right:8px;flex:none}
-.m1 .cv{font-family:Consolas,monospace;font-size:20px;font-weight:700;color:#22D3EE;margin-right:10px;flex:none}
-.m1 .pr{font-size:18px;color:#9FB4CE;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.m1 .ef{font-size:20px;font-weight:700;color:#E5EEF9;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.m2{font-size:19px;line-height:26px;color:#C7D6EA;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.m2 i{font-style:normal;color:#93A9C6}
-.sc9{background:#EF4444;color:#fff}.sc7{background:#F97316;color:#111}
-.empty{color:#93A9C6;font-size:20px;padding:10px 0}
+.empty{color:#7C93B2;font-size:20px;padding:10px 0;line-height:1.5}
 /* 차트 */
-#chart{display:grid;grid-template-columns:1fr;padding:12px 22px}
-.dn2{display:flex;align-items:center;height:104px}
-.dnw{position:relative;width:104px;height:104px;margin-right:26px;flex:none}
-.dnc{position:absolute;left:0;top:0;width:104px;height:104px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.dn2{display:flex;align-items:center;height:124px}
+.dnw{position:relative;width:118px;height:118px;margin-right:22px;flex:none}
+.dnc{position:absolute;left:0;top:0;width:118px;height:118px;display:flex;flex-direction:column;align-items:center;justify-content:center}
 .dnc b{font-size:30px;font-weight:900;line-height:1}
-.dnc span{font-size:13px;color:#93A9C6}
-.lgs{display:grid;grid-template-columns:1fr 1fr;column-gap:26px;row-gap:6px;flex:1}
-.lg{font-size:19px;line-height:24px;white-space:nowrap;display:flex;align-items:center}
-.lg i{width:14px;height:14px;border-radius:4px;margin-right:9px;flex:none}
-.lg b{margin-left:auto;color:#22D3EE;font-size:20px}
+.dnc span{font-size:13px;color:#7C93B2}
+.lgs{flex:1;min-width:0}
+.lg{font-size:17px;line-height:22px;white-space:nowrap;display:flex;align-items:center}
+.lg i{width:12px;height:12px;border-radius:3px;margin-right:8px;flex:none}
+.lg b{margin-left:auto;color:#22D3EE;font-size:17px}
 /* 국내 보안행사 */
-.ev{display:grid;grid-template-columns:1fr 110px;column-gap:14px;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.ev{display:grid;grid-template-columns:1fr 100px;column-gap:14px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07)}
 .ev:last-child{border-bottom:0}
-.evl{display:flex;align-items:center;margin-bottom:0}
+.evl{display:flex;align-items:center;margin-bottom:2px}
 .dt{font-size:20px;font-weight:900;color:#22D3EE;white-space:nowrap;margin-right:10px}
-.tt2{font-size:23px;font-weight:700;line-height:28px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pl{font-size:17px;line-height:20px;color:#93A9C6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tt2{font-size:23px;font-weight:700;line-height:30px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pl{font-size:17px;line-height:22px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .evm{min-width:0}
 .bd{font-size:18px;font-weight:900;text-align:center;border-radius:8px;padding:4px 0;background:rgba(34,211,238,.15);color:#22D3EE;white-space:nowrap}
 .bd.hot{background:#EF4444;color:#fff}
@@ -1060,7 +853,7 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 a.lk{color:inherit;text-decoration:none;cursor:pointer}
 a.mini{display:block}
 a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius:8px;background:rgba(34,211,238,.08)}
-#foot{display:flex;justify-content:space-between;align-items:center;font-size:18px;color:#93A9C6;padding:0 10px}
+#foot{display:flex;justify-content:space-between;align-items:center;font-size:18px;color:#7C93B2;padding:0 10px}
 #foot .bad{color:#FACC15;font-weight:900}
 .pulse{display:inline-block;width:10px;height:10px;border-radius:50%;background:#34D399;margin-right:8px;animation:blink 2s infinite}
 </style>
@@ -1088,7 +881,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
         <text x="106" y="58" font-family="'Malgun Gothic','Noto Sans KR',sans-serif" font-size="29" font-weight="900" fill="#FFFFFF">(주)비테크놀로지</text>
         <text x="108" y="83" font-family="Arial,'Noto Sans KR',sans-serif" font-size="17" font-weight="700" letter-spacing="1.6" fill="#9FB4CE">BEE TECHNOLOGY</text>
       </svg>
-      <div style="margin-left:22px"><b style="font-size:42px">오늘의 보안 브리핑</b></div>
+      <div style="margin-left:22px"><b style="font-size:34px">오늘의 보안 브리핑</b><span>Daily Security Briefing</span></div>
     </div>
     <div class="clock"><div id="clock">--:--</div><div id="date"></div></div>
   </div>
@@ -1097,7 +890,7 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
     <div id="chip" class="chip lv0">위협 수준<b>-</b><small>자체 산정</small></div>
     <div id="stats">
       <div class="st"><span class="lb">신규 악용(2일)</span><b id="c1">0</b><em>건</em></div>
-      <div class="st"><span class="lb">Critical CVE(2일)</span><b id="c2">0</b><em>건</em></div>
+      <div class="st"><span class="lb">CVSS 8.0+(2일)</span><b id="c2">0</b><em>건</em></div>
       <div class="st"><span class="lb">취급 제품(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
     </div>
   </div>
@@ -1117,24 +910,18 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
   </div>
 
   <div class="panel">
-    <div class="hd"><div class="ttl">신규 Critical CVE<small>NVD · 최근 2일 · CVSS 9.0 이상</small></div>
+    <div class="hd"><div class="ttl">신규 고위험 CVE<small>NVD · CVSS 8.0 이상 · 최신 공개순 10건</small></div>
       <div class="pg"><button class="pb" onclick="nav('nvd',-1)">&lsaquo;</button><span class="pd" id="d-nvd"></span><button class="pb" onclick="nav('nvd',1)">&rsaquo;</button></div></div>
     <div id="nvd" class="fade"></div>
   </div>
 
-  <div class="panel">
-    <div class="hd"><div class="ttl">Cisco 보안 권고<small>PSIRT · 최신 권고</small></div>
-      <div class="pg"><button class="pb" onclick="nav('psirt',-1)">&lsaquo;</button><span class="pd" id="d-psirt"></span><button class="pb" onclick="nav('psirt',1)">&rsaquo;</button></div></div>
-    <div id="psirt" class="fade"></div>
-  </div>
-
-  <div id="chart" class="panel">
-    <div class="hd" style="margin-bottom:4px"><div class="ttl">공격 유형 비율<small>CISA 악용 취약점 · 최근 30일</small></div></div>
-    <div id="donut"></div>
+  <div class="two">
+    <div class="panel"><div class="ttl" style="margin-bottom:10px">Cisco 보안 권고<small>PSIRT</small></div><div id="psirt"></div></div>
+    <div class="panel"><div class="ttl" style="margin-bottom:6px">공격 유형 비율<small>CISA · 최근 30일</small></div><div id="donut"></div></div>
   </div>
 
   <div class="panel">
-    <div class="hd"><div class="ttl">국내 보안 행사<small>교육·세미나·컨퍼런스 · 벡스코·부산 기관</small></div>
+    <div class="hd"><div class="ttl">국내 보안 행사<small>IT·AI·보안 교육/세미나 · 벡스코·부산 기관 공고</small></div>
       <div class="pg"><button class="pb" onclick="nav('events',-1)">&lsaquo;</button><span class="pd" id="d-events"></span><button class="pb" onclick="nav('events',1)">&rsaquo;</button></div></div>
     <div id="events" class="fade"></div>
   </div>
@@ -1172,7 +959,7 @@ function ago(ts){if(!ts)return '';var m=Math.floor((Date.now()/1000-ts)/60);if(m
 /* 날씨 아이콘 */
 function kind(c){if(c<=1)return 'sun';if(c==2)return 'part';if(c==3)return 'cloud';if(c==45||c==48)return 'fog';
  if((c>=71&&c<=77)||c==85||c==86)return 'snow';return 'rain'}
-function label(c){var k=kind(c);return {sun:'맑음',part:'구름많음',cloud:'흐림',fog:'안개',snow:'눈',rain:c>=95?'뇌우':'비'}[k]}
+function label(c){var k=kind(c);return {sun:'맑음',part:'구름조금',cloud:'흐림',fog:'안개',snow:'눈',rain:c>=95?'뇌우':'비'}[k]}
 var CL='<path d="M14 38a8 8 0 0 1 2-15 11 11 0 0 1 21 3 7 7 0 0 1-1 12z" fill="#CBD5E1"/>';
 function ico(c,s){var k=kind(c),b='';
  if(k=='sun')b='<circle cx="28" cy="28" r="10" fill="#FBBF24"/><g stroke="#FBBF24" stroke-width="3" stroke-linecap="round"><path d="M28 6v6M28 44v6M6 28h6M44 28h6M12 12l4 4M40 40l4 4M44 12l-4 4M16 40l-4 4"/></g>';
@@ -1190,45 +977,38 @@ function md(s){var p=s.split('-'),dd=new Date(+p[0],+p[1]-1,+p[2]);return pad(+p
 function renderWx(w){
  if(!w||!w.days){$('wx').innerHTML='<div class="empty">날씨 데이터 없음</div>';return}
  var ts=todayStr();
- var h='<div class="now"><div class="ttl" style="margin-bottom:2px">부산 날씨</div><div style="display:flex;align-items:center">'+ico(w.code,52)+'<div class="big" style="margin-left:6px">'+w.temp+'°</div></div><div class="cond">'+label(w.code)+'<br>최고 '+w.days[0].max+'° / 최저 '+w.days[0].min+'°</div></div><div class="week">';
+ var h='<div class="now"><div class="ttl" style="margin-bottom:2px">부산 날씨</div><div style="display:flex;align-items:center">'+ico(w.code,52)+'<div class="big" style="margin-left:6px">'+w.temp+'°</div></div><div class="cond">'+label(w.code)+' · 최고 '+w.days[0].max+'° / 최저 '+w.days[0].min+'°</div></div><div class="week">';
  for(var i=0;i<w.days.length;i++){var d=w.days[i],dt=new Date(d.date+'T00:00:00'),rain=kind(d.code)=='rain'||kind(d.code)=='snow';
   h+='<div class="day'+(d.date==ts?' today':'')+(rain?' rain':'')+'"><div class="dn">'+(d.date==ts?'오늘':DAYS[dt.getDay()])+'</div><div class="dd">'+pad(dt.getMonth()+1)+'/'+pad(dt.getDate())+'</div>'+ico(d.code,38)+'<div class="tt">'+d.max+'° <i>'+d.min+'°</i></div><div class="pp">강수 '+d.pop+'%</div></div>'}
  $('wx').innerHTML=h+'</div>'}
 
-/* ---------- 수동/자동 넘김 패널 (뉴스 · 긴급 취약점 · 국내 행사) ---------- */
-var LIST={news:[],kev:[],events:[],nvd:[],psirt:[]};
-var PER={news:3,kev:3,events:2,nvd:2,psirt:2};
-var MAXP={news:4,kev:3,events:6,nvd:3,psirt:3};
-var PAGE={news:0,kev:0,events:0,nvd:0,psirt:0};
+/* ---------- 수동/자동 넘김 패널 (뉴스 · 긴급 취약점 · 신규 CVE · 국내 행사) ---------- */
+var LIST={news:[],kev:[],nvd:[],events:[]};
+var PER={news:3,kev:3,nvd:3,events:2};
+var MAXP={news:4,kev:3,nvd:4,events:8};
+var PAGE={news:0,kev:0,nvd:0,events:0};
 var EMPTY={
  news:'<div class="empty">뉴스 데이터 없음</div>',
  kev:'<div class="empty">KEV 데이터 없음</div>',
- nvd:'<div class="empty">최근 2일간 신규 Critical 없음</div>',
- psirt:'<div class="empty">Cisco 권고 데이터 없음</div>',
- events:'<div class="empty">표시할 국내 보안 행사가 아직 없습니다 (events.json 에 직접 등록할 수 있습니다)</div>'};
+ nvd:'<div class="empty">최근 3일간 CVSS 8.0 이상 신규 CVE 없음</div>',
+ events:'<div class="empty">표시할 국내 보안 행사가 없습니다</div>'};
 var SUPPRESS=0;
 function evHtml(e){
  var ts=todayStr(),tn=dnum(ts),t=esc(e.type||'행사');
- if(e.kind=='event'){
-  var sd=dnum(e.date),ed=dnum(e.end),bd,bc='';
-  if(tn>=sd&&tn<=ed){bd=(sd==ed)?'오늘':'진행중';bc=' hot'}
-  else{var df=sd-tn;bd='D-'+df;if(df<=7)bc=' soon'}
-  var dtx=md(e.date)+(e.end!=e.date?' ~ '+md(e.end):'')+(e.time?' '+esc(e.time):'');
-  var st=(e.src&&e.src!='등록')?'<span class="tg tgE">'+esc(e.src)+'</span>':'';
-  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="dt">'+dtx+'</span>'+st+'<span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div>'+(e.place?'<div class="pl">'+esc(e.place)+'</div>':'')+'</div><span class="bd'+bc+'">'+bd+'</span>')}
- if(e.kind=='site'){
-  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">'+esc(e.src||'공고')+'</span><span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+(e.posted?md(e.posted)+' 게시 · ':'')+'일정은 원문에서 확인</div></div><span class="bd nw">공고</span>')}
- return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">모집·공지</span><span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+ago(e.ts)+' 보도 · 날짜는 원문 확인</div></div><span class="bd nw">검색</span>')}
+ if(e.kind=='board'){
+  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">'+esc(e.site)+'</span>'+(e.sec?'<span class="tg tgE">보안</span>':'')+'<span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+(e.posted?esc(e.posted)+' 게시':'게시일 미확인')+' · 일정은 원문에서 확인</div></div><span class="bd nw">공고</span>')}
+ var sd=dnum(e.date),ed=dnum(e.end),bd,bc='';
+ if(tn>=sd&&tn<=ed){bd=(sd==ed)?'오늘':'진행중';bc=' hot'}
+ else{var df=sd-tn;bd='D-'+df;if(df<=7)bc=' soon'}
+ var dtx=md(e.date)+(e.end!=e.date?' ~ '+md(e.end):'')+(e.time?' '+esc(e.time):'');
+ var tag=(e.kind=='bexco')?'<span class="tg tgE">벡스코</span><span class="tg tgN">'+t+'</span>':'<span class="tg tgN">'+t+'</span>';
+ return A('ev',e.link,'<div class="evm"><div class="evl"><span class="dt">'+dtx+'</span>'+tag+'</div><div class="tt2">'+esc(e.title)+'</div>'+(e.place?'<div class="pl">'+esc(e.place)+'</div>':'')+'</div><span class="bd'+bc+'">'+bd+'</span>')}
 var RENDER={
  news:function(n){return A('row',n.link,'<span class="src">'+esc(n.src)+'</span><div class="t">'+esc(n.title)+'</div><span class="ago">'+ago(n.ts)+'</span>')},
  kev:function(v){return A('kev',NVD+v.cve,'<div class="cve">'+esc(v.cve)+'</div><div><div class="a">'+(v.ours?'<span class="tag our">취급</span>':'')+(v.ransom?'<span class="tag rw">랜섬웨어</span>':'')+'<span class="atk l'+(v.lvl||3)+'">'+esc(v.atk)+'</span>'+esc(v.vendor)+' '+esc(v.product)+'</div><div class="b">'+esc(v.cat)+' · '+esc(v.eff)+' <span class="sol">→ '+esc(v.sol)+'</span></div></div><div class="due">조치 '+esc(String(v.due).slice(5))+'</div>')},
- events:evHtml,
- nvd:function(v){return A('vr',NVD+v.cve,'<div class=\"cve\">'+esc(v.cve)+'</div><div><div class=\"a\"><span class=\"atk l'+(v.lvl||3)+'\">'+esc(v.atk)+'</span>'+esc(v.prod)+'</div><div class=\"b\">'+esc(v.cat)+' · '+esc(v.eff)+'</div></div><div class=\"sc '+(v.score>=9?'s9':'s7')+'\">'+Number(v.score).toFixed(1)+'<small>CVSS</small></div>')},
- psirt:function(p){var c=p.cves||[],cl;
-  if(!c.length){cl='<div class=\"cn\">CVE 번호 없음</div>'}
-  else if(c.length<=2){cl=c.map(function(x){return '<div class=\"cv2\">'+esc(x)+'</div>'}).join('')}
-  else{cl='<div class=\"cv2\">'+esc(c[0])+'</div><div class=\"cn\">외 '+(c.length-1)+'건 더</div>'}
-  return A('vr p',p.link,'<div>'+cl+'</div><div><div class=\"a\"><span class=\"atk l'+(p.lvl||3)+'\">'+esc(p.atk)+'</span>'+(p.sev?'<span class=\"atk '+(p.sev=='치명'||p.sev=='높음'?'l1':'l3')+'\">'+esc(p.sev)+'</span>':'')+esc(p.eff)+'</div><div class=\"b\">'+esc(p.title)+'</div></div>'+(p.score?'<div class=\"sc '+(p.score>=9?'s9':(p.score>=7?'s7':'s4'))+'\">'+Number(p.score).toFixed(1)+'<small>CVSS · '+ago(p.ts)+'</small></div>':'<div class=\"ag\">'+ago(p.ts)+'</div>'))}
+ nvd:function(n){var dd=new Date((n.ts||0)*1000);
+  return A('nv',NVD+n.cve,'<div class="nv1"><b class="'+(n.score>=9?'sc9':'sc7')+'">'+n.score+'</b><span class="atk l'+(n.lvl||3)+'">'+esc(n.atk)+'</span><span class="nvc">'+esc(n.cve)+'</span><span class="nvd2">'+(n.ts?pad(dd.getMonth()+1)+'/'+pad(dd.getDate())+' '+pad(dd.getHours())+':'+pad(dd.getMinutes())+' 공개':'')+'</span></div><div class="nv2">'+esc(n.cat)+' · '+esc(n.eff)+(n.prod?' · '+esc(n.prod):'')+'</div>')},
+ events:evHtml
 };
 function pages(name){return Math.max(1,Math.min(MAXP[name],Math.ceil(LIST[name].length/PER[name])))}
 function paint(name){
@@ -1251,7 +1031,7 @@ function bindSwipe(name){
   var dx=e.clientX-sx,dy=e.clientY-sy;
   if(Math.abs(dx)>60&&Math.abs(dx)>Math.abs(dy)*1.5){SUPPRESS=Date.now()+400;nav(name,dx<0?1:-1)}});
  el.addEventListener('click',function(e){if(Date.now()<SUPPRESS){e.preventDefault();e.stopPropagation()}},true)}
-['news','kev','events','nvd','psirt'].forEach(function(n){
+['news','kev','nvd','events'].forEach(function(n){
  bindSwipe(n);
  if(AUTO[n]>0)setInterval(function(){nav(n,1)},AUTO[n]*1000)});
 
@@ -1267,7 +1047,7 @@ function renderStatus(st){
  st=st||{};
  var lv={'안정':0,'주의':1,'경계':2}[st.level];if(lv==null)lv=0;
  $('chip').className='chip lv'+lv;
- $('chip').innerHTML='<i class="cd"></i><span class="cl">위협 수준</span><b>'+esc(st.level||'-')+'</b>';
+ $('chip').innerHTML='위협 수준<b>'+esc(st.level||'-')+'</b><small>자체 산정</small>';
  countTo($('c1'),st.new2);countTo($('c2'),st.nvd);countTo($('c3'),st.ours7);
  $('c3id').textContent=(st.ours7_ids||[]).join(', ')}
 
@@ -1285,7 +1065,7 @@ function renderDonut(st){
   segs+='<circle cx="52" cy="52" r="40" fill="none" stroke="'+col+'" stroke-width="14" transform="rotate(-90 52 52)" style="stroke-dasharray:0 '+C+';transition:stroke-dasharray 1s ease" stroke-dashoffset="'+(-cum)+'" data-d="'+len+' '+(C-len)+'"/>';
   cum+=len;
   lg+='<div class="lg"><i style="background:'+col+'"></i>'+esc(ty[i].name)+'<b>'+ty[i].n+'건</b></div>'}
- $('donut').innerHTML='<div class="dn2"><div class="dnw"><svg width="104" height="104" viewBox="0 0 104 104"><circle cx="52" cy="52" r="40" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14"/>'+segs+'</svg><div class="dnc"><b>'+t+'</b><span>30일 합계</span></div></div><div class="lgs">'+lg+'</div></div>';
+ $('donut').innerHTML='<div class="dn2"><div class="dnw"><svg width="118" height="118" viewBox="0 0 104 104"><circle cx="52" cy="52" r="40" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14"/>'+segs+'</svg><div class="dnc"><b>'+t+'</b><span>30일 합계</span></div></div><div class="lgs">'+lg+'</div></div>';
  setTimeout(function(){
   var cs=$('donut').getElementsByTagName('circle'),k;
   for(k=0;k<cs.length;k++){var dd=cs[k].getAttribute('data-d');if(dd)cs[k].style.strokeDasharray=dd}
@@ -1304,7 +1084,7 @@ function setTicker(html){
  tk.style.animation='tkscroll '+Math.max(20,Math.round(bw/70))+'s linear infinite'}
 function buildTicker(d){
  var u=[],nw=(d.news||[]).slice(0,8),kv=(d.kev||[]).slice(0,5),ts=todayStr(),i;
- var ev=(d.events||[]).filter(function(e){return e.kind=='event'&&e.end>=ts}).slice(0,2);
+ var ev=(d.events||[]).filter(function(e){return (e.kind=='event'||e.kind=='bexco')&&e.end>=ts}).slice(0,2);
  for(i=0;i<nw.length;i++){
   u.push('<span class="ti"><b class="tg2 tgN">뉴스</b>'+esc(nw[i].title)+'</span>');
   if(kv[i])u.push('<span class="ti"><b class="tg2 tgC">CVE</b>'+esc(kv[i].cve)+' '+esc(kv[i].atk)+' · '+esc(kv[i].vendor)+' '+esc(kv[i].product)+'</span>')}
@@ -1316,12 +1096,15 @@ function render(d){
  renderWx(d.weather);
  LIST.news=(d.news||[]).slice(0,12);
  LIST.kev=(d.kev||[]).slice(0,8);
- LIST.events=(d.events||[]).slice(0,12);
- paint('news');paint('kev');paint('events');
+ LIST.nvd=(d.nvd||[]).slice(0,10);
+ LIST.events=d.events||[];
+ var lg=(d.ev_log||[]).join(' · ');
+ EMPTY.events='<div class="empty">표시할 국내 보안 행사가 없습니다.<br><span style="font-size:15px;color:#7C93B2">수집 결과: '+esc(lg||'기록 없음')+'</span></div>';
+ paint('news');paint('kev');paint('nvd');paint('events');
 
- LIST.nvd=(d.nvd||[]).slice(0,6);
- LIST.psirt=(d.psirt||[]).slice(0,6);
- paint('nvd');paint('psirt');
+ var i,h='',ps=(d.psirt||[]).slice(0,2);
+ for(i=0;i<ps.length;i++)h+=A('mini',ps[i].link,'<span class="atk l'+(ps[i].lvl||3)+'">'+esc(ps[i].atk)+'</span>'+(ps[i].sev?'<span class="atk '+(ps[i].sev=='치명'||ps[i].sev=='높음'?'l1':'l3')+'">'+esc(ps[i].sev)+'</span>':'')+'<span style="font-size:18px;color:#C7D6EA">'+esc(ps[i].eff)+'</span><div style="font-size:15px;line-height:20px;color:#7C93B2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(ps[i].title)+' · '+ago(ps[i].ts)+'</div>');
+ $('psirt').innerHTML=h||'<div class="empty">Cisco 권고 데이터 없음</div>';
 
  renderStatus(d.stats);
  renderDonut(d.stats);
@@ -1331,8 +1114,8 @@ function render(d){
 function load(){
  var x=new XMLHttpRequest();x.open('GET','data.json?'+Date.now(),true);
  x.onload=function(){
-  try{DATA=JSON.parse(x.responseText);render(DATA)}
-  catch(e){if(window.console)console.error('render error',e)}};
+  try{DATA=JSON.parse(x.responseText)}catch(e){if(window.console)console.log('data.json error',e);return}
+  try{render(DATA)}catch(e){if(window.console)console.log('render error',e)}};
  x.send()}
 load();setInterval(load,60000);setInterval(tick,1000);tick();
 setTimeout(function(){location.reload()},6*3600*1000); /* 6시간마다 전체 새로고침 (TV 브라우저 멈춤 방지) */
