@@ -376,11 +376,26 @@ def psirt_item(x):
 
 
 # ----------------------------- 수집: 뉴스 / 취약점 -----------------------------
+# 보안과 무관한 기사(경조사·인사·동정 등) 제외
+#   - [화촉] [부고] [인사] 처럼 말머리가 붙은 기사
+#   - 결혼식·청첩·부친상 처럼 경조사가 분명한 표현
+#   (제목에 '결혼'이 들어간 일반 보안 기사는 통과: 예) 결혼정보회사 개인정보 유출)
+NOISE_TAG_RE = re.compile(r"^\s*[\[\(【<]\s*(?:화촉|결혼|혼사|청첩|부고|부음|경조사?|인사|동정)\s*[\]\)】>]")
+NOISE_RE = re.compile(
+    r"화촉|청첩|혼례|결혼식|결혼\s*(?:합니다|했습니다|소식)|(?:장남|장녀|차남|차녀|아들|딸|본인)\s*결혼"
+    r"|부고|부음|부친상|모친상|빙부상|빙모상|장인상|장모상|시부상|시모상|조부상|조모상|별세|빈소|발인|영결식")
+
+
+def is_noise(title):
+    t = title or ""
+    return bool(NOISE_TAG_RE.search(t) or NOISE_RE.search(t))
+
+
 def fetch_news():
     items, ok = [], 0
     for name, url in NEWS_FEEDS:
         try:
-            items += parse_rss(url, name)
+            items += [x for x in parse_rss(url, name) if not is_noise(x["title"])]
             ok += 1
         except Exception as e:
             print("[실패] 뉴스", name, e)
@@ -445,18 +460,38 @@ def fetch_nvd():
         "pubEndDate": now.strftime("%Y-%m-%dT%H:%M:%S.000"),
         "resultsPerPage": 2000,
     })
-    url = "https://services.nvd.nist.gov/rest/json/cves/2.0?" + q
-    data, last = None, None
-    for _ in range(2):
-        try:
-            data = json.loads(http_get(url, 120).decode("utf-8"))
-            break
-        except Exception as e:
-            last = e
-            print("[재시도] NVD", e)
-            time.sleep(8)
-    if data is None:
+    base = "https://services.nvd.nist.gov/rest/json/cves/2.0?" + q
+
+    def get_page(start):
+        url = base + ("&startIndex=%d" % start if start else "")
+        last = None
+        for _ in range(2):
+            try:
+                return json.loads(http_get(url, 120).decode("utf-8"))
+            except Exception as e:
+                last = e
+                print("[재시도] NVD", e)
+                time.sleep(8)
         raise last
+
+    # NVD 는 한 번에 최대 2000건만 주므로, 총 건수(totalResults)만큼 startIndex 로 이어서 모두 받음
+    data = get_page(0)
+    vulns = list(data.get("vulnerabilities", []))
+    total = int(data.get("totalResults") or len(vulns))
+    pages = 1
+    while len(vulns) < total and pages < 8:
+        time.sleep(7)        # 키 없는 NVD API 는 30초에 5회 제한
+        try:
+            more = get_page(len(vulns)).get("vulnerabilities", [])
+        except Exception as e:
+            print("[경고] NVD 다음 페이지 실패 (일부만 사용):", e)
+            break
+        if not more:
+            break
+        vulns += more
+        pages += 1
+    print("NVD: 전체", total, "건 중", len(vulns), "건 수신 (", pages, "페이지 )")
+    data = {"vulnerabilities": vulns}
     found = {}
     for v in data.get("vulnerabilities", []):
         c = v.get("cve", {})
