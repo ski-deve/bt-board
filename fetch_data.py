@@ -66,7 +66,7 @@ WATCH_MAX = 8      # 주요 SW 항목을 목록에 우선 포함하는 최대 �
 # 주요 SW 감시 (표시 이름, 영문 설명에서 찾을 정규식). 필요하면 줄을 추가하세요.
 WATCH = [
     ("Java", r"openjdk|\bjdk\b|\bjava(?!script)\b|graalvm"),
-    ("nginx", r"\bnginx\b"),
+    ("nginx", r"\bnginx\b|\bngx_"),
     ("Apache", r"apache (?:http|httpd|tomcat|struts|log4j)|\btomcat\b|\bhttpd\b|\blog4j\b"),
     ("OpenSSH", r"\bopenssh\b"),
     ("OpenSSL", r"\bopenssl\b"),
@@ -76,9 +76,12 @@ WATCH = [
 ]
 
 # 위협 수준 (자체 산정 기준이며 국가 공식 경보 단계와 무관합니다)
-#   점수 = 신규 악용(최근 2일, 최대 8) + 취급 제품 해당(7일, 건당 3점, 최대 6) + CVSS 8.0 이상 15건 이상(2점) + Cisco 치명·높음 권고(3점)
+#   점수 = 신규 악용(최근 2일, 최대 8) + 취급 제품 해당(7일, 건당 3점, 최대 6) + Critical(9.0 이상) CVE 건수 가산점(최대 2점) + Cisco 치명·높음 권고(3점)
 THREAT_MID = 5     # 이 점수 이상이면 "주의"
 THREAT_HIGH = 10   # 이 점수 이상이면 "경계"
+CRIT_MIN = 9.0     # Critical 기준 점수
+# 최근 2일 Critical(9.0 이상) 건수에 따른 가산점: (건수 이상, 가산점) - 큰 건수부터 적습니다. 상태 바 숫자를 보고 조정하세요.
+CRIT_TIERS = ((300, 2), (150, 1))
 
 # 자동 넘김 간격(초). 0 이면 끔 (기본: 버튼·드래그로 수동 넘김)
 AUTO = {"news": 0, "kev": 0, "nvd": 0, "psirt": 0, "kisa": 0, "events": 0, "wx": 0}
@@ -141,6 +144,8 @@ except Exception:
 
 _KEV_CACHE = None   # KEV 원본 (한 번만 내려받아 재사용)
 _NVD_TOTAL = None   # 최근 2일 CVSS 8.0 이상 CVE 건수
+_NVD_CRIT = None    # 최근 2일 Critical(9.0 이상) CVE 건수
+_NVD_WATCH = None   # 최근 2일 주요 SW(Java, nginx 등) 해당 CVE 건수
 EV_LOG = []         # 행사 수집 결과 요약 (화면에 표시)
 
 
@@ -318,11 +323,26 @@ def categorize(text):
     return DEFAULT_CAT
 
 
+# 설명문에서 "취약한 제품명" 부분이 끝나는 지점 (예: "NGINX Open Source ... have", "In PHP versions ... allows")
+_SUBJ_END = re.compile(r"\b(?:allows?|allowing|could|can|may|might|contains?|is vulnerable|are vulnerable|has|have|had|exposes?|"
+                       r"fails?|does not|do not|lacks?|permits?|enables?|mishandles?|uses?|is affected|are affected)\b|\.\s|;")
+_WATCH_GUARD = ("PHP", "Java", "Node.js")   # 언어/런타임 이름은 'PHP 기반 앱'처럼 다른 제품 설명에 자주 쓰여 추가 확인
+_AFTER = re.compile(r"[\s\-]*(?:based|powered|framework|sdk|packages?|scripts?|code|files?|objects?|web ?shell|plugins?|cms|"
+                    r"apps?|applications?|wrappers?|bindings?|connectors?|drivers?|integration|clients?)\b")
+_BEFORE = re.compile(r"(?:\bfor|\bon|\bwith|\busing|written in|built (?:with|on)|based on|powered by|running on|runs on)\s+(?:the\s+)?$")
+
+
 def watch_label(text):
-    """주요 SW(Java, nginx 등) 해당 시 표시 이름, 아니면 빈 문자열"""
-    low = (text or "").lower()
+    """주요 SW(Java, nginx 등) 해당 시 표시 이름, 아니면 빈 문자열.
+    설명문 앞부분의 '취약한 제품명'만 확인합니다. 설명 뒤쪽에 PHP·Java·Node.js 가 언급만 된 다른 제품
+    (예: PHP 파일 업로드가 가능한 관리 도구, Node.js 연동 앱)은 주요 SW 로 표시하지 않습니다."""
+    t = (text or "")[:160]
+    m = _SUBJ_END.search(t)
+    subj = (t[:m.start()] if m else t).lower()
     for name, pat in WATCH:
-        if re.search(pat, low):
+        for mm in re.finditer(pat, subj):
+            if name in _WATCH_GUARD and (_AFTER.match(subj, mm.end()) or _BEFORE.search(subj[:mm.start()])):
+                continue
             return name
     return ""
 
@@ -452,7 +472,7 @@ def best_score(metrics):
 
 def fetch_nvd():
     """NVD 에서 최근 NVD_DAYS 일 공개분을 받아 CVSS(v4.0 포함) NVD_MIN 이상, 주요 SW 는 WATCH_MIN 이상을 최신 공개순으로 NVD_MAX 건 반환"""
-    global _NVD_TOTAL
+    global _NVD_TOTAL, _NVD_CRIT, _NVD_WATCH
     now = dt.datetime.now(dt.timezone.utc)
     start = now - dt.timedelta(days=NVD_DAYS)
     q = urllib.parse.urlencode({
@@ -510,6 +530,8 @@ def fetch_nvd():
     items = sorted(found.values(), key=lambda x: (x["ts"], x["score"]), reverse=True)
     cut = time.time() - 48 * 3600
     _NVD_TOTAL = sum(1 for x in items if x["ts"] >= cut and x["score"] >= NVD_MIN)
+    _NVD_CRIT = sum(1 for x in items if x["ts"] >= cut and x["score"] >= CRIT_MIN)
+    _NVD_WATCH = sum(1 for x in items if x["ts"] >= cut and x["watch"])
     # 주요 SW(Java, nginx 등)를 먼저 확보한 뒤 나머지를 최신순으로 채우고, 전체를 최신순으로 정렬
     watch = [x for x in items if x["watch"]][:WATCH_MAX]
     wids = set(x["cve"] for x in watch)
@@ -653,6 +675,73 @@ def load_registered_events():
     return out[:10]
 
 
+# 게시글 본문에서 신청기간 읽기 (예: 신청기간 2026.04.15(수) 09:00 ~ 2026.05.08(금) 18:00 까지)
+_D = r"(20\d\d)\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})"
+_E = r"(?:(20\d\d)\s*[.\-/년]\s*)?(?:(\d{1,2})\s*[.\-/월]\s*)?(\d{1,2})(?![\d:]|\s*:)"
+_RNG = r"[^~∼～–]{0,40}?[~∼～–]\s*"
+APPLY_KW = r"(?:신청|접수|모집|등록|응모|지원|참가\s*신청|참가\s*등록)\s*(?:기간|일정|기한)"
+APPLY_RANGE_RE = re.compile(APPLY_KW + r"[^0-9~∼～]{0,20}" + _D + _RNG + _E)
+APPLY_UNTIL_RE = re.compile(APPLY_KW + r"[^0-9~∼～]{0,20}[~∼～]\s*" + _D)
+APPLY_SINGLE_RE = re.compile(r"(?:접수|신청|모집)\s*마감(?:일|일자)?\s*[:：]?\s*" + _D)
+APPLY_DAY_RE = re.compile(APPLY_KW + r"[^0-9~∼～]{0,20}" + _D + r"[^~∼～–]{0,25}?\d{1,2}:\d{2}\s*[~∼～–]\s*\d{1,2}:\d{2}")   # 하루짜리: 2026.11.01 09:00 ~ 18:00
+EVENT_DATE_RE = re.compile(r"(?:행사\s*일시|개최\s*일시|교육\s*일시|교육\s*일정|교육\s*기간|행사\s*일정|개최\s*일정|일\s*시)\s*[:：]?[^0-9]{0,6}"
+                           + _D + r"(?:" + _RNG + _E + r")?")
+
+
+def _end_date(sy, sm, sd, ey, em, ed):
+    """시작일과 (생략될 수 있는) 종료일 표기를 합쳐 종료 날짜 계산. 예: 2026.8.4 ~ 8.19 -> 2026-08-19"""
+    try:
+        start = dt.date(int(sy), int(sm), int(sd))
+        end = dt.date(int(ey) if ey else start.year, int(em) if em else start.month, int(ed) if ed else start.day)
+        if not ey and end < start:           # 12.20 ~ 1.5 처럼 해가 바뀌는 경우
+            end = end.replace(year=end.year + 1)
+        return end
+    except ValueError:
+        return None
+
+
+def read_deadline(text, today):
+    """게시글 본문에서 (신청 마감일 'YYYY-MM-DD' 또는 '', 이미 끝났는지) 를 돌려줌.
+    신청기간이 없으면 행사·교육 일시로 판단하고, 아무것도 못 찾으면 ('', False) 로 그대로 둠."""
+    ends = []
+    for m in APPLY_RANGE_RE.finditer(text):
+        e = _end_date(*m.groups())
+        if e:
+            ends.append(e)
+    for rx in (APPLY_UNTIL_RE, APPLY_SINGLE_RE, APPLY_DAY_RE):
+        for m in rx.finditer(text):
+            try:
+                ends.append(dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+            except ValueError:
+                pass
+    if ends:
+        until = max(ends)               # 기간이 여러 개면 가장 늦은 마감일 기준
+        return until.isoformat(), until < today
+    evs = []
+    for m in EVENT_DATE_RE.finditer(text):
+        e = _end_date(*m.groups())
+        if e:
+            evs.append(e)
+    if evs and max(evs) < today:
+        return "", True
+    return "", False
+
+
+def check_board(b):
+    """게시글 본문을 읽어 신청 마감일(until)을 채우고, 신청기간이 끝난 공고면 True. 읽지 못하면 False(그대로 표시)"""
+    try:
+        pu = urllib.parse.urlparse(b["link"])
+        page = fetch_html(b["link"], pu.scheme + "://" + pu.netloc, 15)
+    except Exception as e:
+        print("[경고] 게시글 확인 실패", b["link"][-40:], str(e)[:50])
+        return False
+    page = re.sub(r"(?is)<(script|style).*?</\1>", " ", page)
+    until, expired = read_deadline(clean(page), dt.datetime.now(KST).date())
+    if until:
+        b["until"] = until
+    return expired
+
+
 def scrape_site(site):
     """기관 게시판 목록에서 게시글 링크(require_param 포함)를 찾아 IT·AI·보안 교육/공고만 추림"""
     page = fetch_html(site["url"], site["domain"], 15)
@@ -754,10 +843,19 @@ def fetch_events():
             continue
         seen.add(key)
         uniq.append(b)
-    boards = uniq[:10]
+    kept, dropped, t0 = [], 0, time.time()
+    for b in uniq[:14]:
+        if time.time() - t0 < 90 and check_board(b):     # 신청기간이 끝난 공고는 제외 (확인에 90초 이상 걸리면 나머지는 그대로)
+            dropped += 1
+            continue
+        kept.append(b)
+        time.sleep(0.5)
+    boards = kept[:10]
 
     EV_LOG.extend(["직접등록 %d건" % len(reg), "벡스코 %d건" % len(bex),
                    "기관 게시판 %d건 (%d곳 중 %d곳 응답)" % (len(boards), len(TARGET_SITES), ok_sites)])
+    if dropped:
+        EV_LOG.append("신청기간 종료로 제외 %d건" % dropped)
     if ok_sites == 0:
         EV_LOG.append("기관 사이트 접속 실패(해외 서버 차단 가능)")
     print("행사:", " / ".join(EV_LOG))
@@ -798,7 +896,7 @@ def fetch_weather():
 
 
 # ----------------------------- 통계 (위협 수준) -----------------------------
-def build_stats(psirt, prev_nvd=0):
+def build_stats(psirt, prev_nvd=0, prev_crit=0, prev_watch=0):
     kev = _KEV_CACHE
     if not kev:
         raise RuntimeError("KEV 데이터 없음")
@@ -821,10 +919,14 @@ def build_stats(psirt, prev_nvd=0):
     now = time.time()
     psirt_hi = any(p.get("sev") in ("치명", "높음") and now - p.get("ts", 0) <= 86400 for p in (psirt or []))
     nvd = _NVD_TOTAL if _NVD_TOTAL is not None else prev_nvd
-    score = min(new2, 8) + 3 * min(len(ours7_ids), 2) + (2 if nvd >= 15 else 0) + (3 if psirt_hi else 0)
+    crit = _NVD_CRIT if _NVD_CRIT is not None else prev_crit
+    watch = _NVD_WATCH if _NVD_WATCH is not None else prev_watch
+    crit_pts = next((pts for n, pts in CRIT_TIERS if crit >= n), 0)
+    score = min(new2, 8) + 3 * min(len(ours7_ids), 2) + crit_pts + (3 if psirt_hi else 0)
+    print("[통계] 최근 2일 Critical(9.0+)", crit, "건 / 주요 SW", watch, "건 / Critical 가산점", crit_pts)
     level = "경계" if score >= THREAT_HIGH else ("주의" if score >= THREAT_MID else "안정")
     return {"new2": new2, "ours7": len(ours7_ids), "ours7_ids": ours7_ids[:3],
-            "nvd": nvd, "score": score, "level": level}
+            "nvd": nvd, "crit": crit, "watch": watch, "score": score, "level": level}
 
 
 # ----------------------------- 실행 -----------------------------
@@ -857,7 +959,8 @@ def main():
             data[key] = prev.get(key, empty)
     data["ev_log"] = list(EV_LOG) if "events" not in data["errors"] else prev.get("ev_log", [])
     try:
-        data["stats"] = build_stats(data.get("psirt", []), (prev.get("stats") or {}).get("nvd", 0))
+        ps = prev.get("stats") or {}
+        data["stats"] = build_stats(data.get("psirt", []), ps.get("nvd", 0), ps.get("crit", 0), ps.get("watch", 0))
         print("[성공] stats 위협수준:", data["stats"]["level"], "점수:", data["stats"]["score"])
     except Exception as e:
         print("[실패] stats", e)
@@ -906,8 +1009,8 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 #clock{font-size:60px;font-weight:900;color:#22D3EE;line-height:60px;letter-spacing:-2px}
 #date{font-size:22px;font-weight:700;line-height:28px}
 /* 상태 바 */
-#status{display:flex;align-items:center;padding:6px 18px}
-.chip{display:flex;align-items:baseline;font-size:20px;font-weight:700;padding:4px 16px;border-radius:12px;background:rgba(255,255,255,.08);margin-right:22px;white-space:nowrap}
+#status{display:flex;align-items:center;padding:6px 12px}
+.chip{display:flex;align-items:baseline;font-size:20px;font-weight:700;padding:4px 12px;border-radius:12px;background:rgba(255,255,255,.08);margin-right:12px;white-space:nowrap}
 .chip b{font-size:30px;font-weight:900;margin-left:8px}
 .chip small{font-size:13px;margin-left:8px;opacity:.7;font-weight:500}
 .chip.lv0{background:#34D399;color:#04281c}
@@ -915,10 +1018,10 @@ html,body{width:100%;height:100%;background:#050A16;overflow:hidden;font-family:
 .chip.lv2{background:#F97316;color:#111}
 #stats{display:flex;flex:1;justify-content:space-between}
 .st{display:flex;align-items:baseline;white-space:nowrap}
-.st .lb{font-size:17px;color:#9FB4CE;margin-right:8px}
-.st b{font-size:38px;font-weight:900;color:#22D3EE;line-height:1}
-.st em{font-style:normal;font-size:17px;color:#9FB4CE;margin-left:3px}
-.st .cid{font-family:Consolas,monospace;font-size:15px;color:#F97316;margin-left:8px}
+.st .lb{font-size:14px;color:#9FB4CE;margin-right:4px}
+.st b{font-size:30px;font-weight:900;color:#22D3EE;line-height:1}
+.st em{font-style:normal;font-size:14px;color:#9FB4CE;margin-left:2px}
+.st .cid{font-family:Consolas,monospace;font-size:13px;color:#F97316;margin-left:6px;max-width:130px;overflow:hidden;text-overflow:ellipsis}
 /* 날씨 */
 #wx{display:grid;grid-template-columns:280px 1fr;column-gap:18px;padding:12px 18px}
 .now{border-right:1px solid rgba(34,211,238,.18);padding-right:14px}
@@ -1042,7 +1145,8 @@ a.lk:hover,a.lk:focus{outline:2px solid #22D3EE;outline-offset:2px;border-radius
     <div id="chip" class="chip lv0">위협 수준<b>-</b><small>자체 산정</small></div>
     <div id="stats">
       <div class="st"><span class="lb">신규 악용(2일)</span><b id="c1">0</b><em>건</em></div>
-      <div class="st"><span class="lb">CVSS 8.0+(2일)</span><b id="c2">0</b><em>건</em></div>
+      <div class="st"><span class="lb">Critical 9.0+(2일)</span><b id="c2">0</b><em>건</em></div>
+      <div class="st"><span class="lb">주요 SW(2일)</span><b id="c4">0</b><em>건</em></div>
       <div class="st"><span class="lb">취급 제품(7일)</span><b id="c3">0</b><em>건</em><span class="cid" id="c3id"></span></div>
     </div>
   </div>
@@ -1174,7 +1278,7 @@ var SUPPRESS=0;
 function evHtml(e){
  var ts=todayStr(),tn=dnum(ts),t=esc(e.type||'행사');
  if(e.kind=='board'){
-  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">'+esc(e.site)+'</span>'+(e.sec?'<span class="tg tgE">보안</span>':'')+'<span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+(e.posted?esc(e.posted)+' 게시':'게시일 미확인')+' · 일정은 원문에서 확인</div></div><span class="bd nw">공고</span>')}
+  return A('ev',e.link,'<div class="evm"><div class="evl"><span class="tg tgS">'+esc(e.site)+'</span>'+(e.sec?'<span class="tg tgE">보안</span>':'')+'<span class="tg tgN">'+t+'</span></div><div class="tt2">'+esc(e.title)+'</div><div class="pl">'+(e.posted?esc(e.posted)+' 게시':'게시일 미확인')+(e.until?' · 신청 ~ '+md(e.until):' · 일정은 원문에서 확인')+'</div></div><span class="bd nw">공고</span>')}
  var sd=dnum(e.date),ed=dnum(e.end),bd,bc='';
  if(tn>=sd&&tn<=ed){bd=(sd==ed)?'오늘':'진행중';bc=' hot'}
  else{var df=sd-tn;bd='D-'+df;if(df<=7)bc=' soon'}
@@ -1230,7 +1334,7 @@ function renderStatus(st){
  var lv={'안정':0,'주의':1,'경계':2}[st.level];if(lv==null)lv=0;
  $('chip').className='chip lv'+lv;
  $('chip').innerHTML='위협 수준<b>'+esc(st.level||'-')+'</b><small>자체 산정</small>';
- countTo($('c1'),st.new2);countTo($('c2'),st.nvd);countTo($('c3'),st.ours7);
+ countTo($('c1'),st.new2);countTo($('c2'),st.crit);countTo($('c4'),st.watch);countTo($('c3'),st.ours7);
  $('c3id').textContent=(st.ours7_ids||[]).join(', ')}
 
 /* ---------- 하단 티커 ---------- */
